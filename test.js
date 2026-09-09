@@ -45,6 +45,7 @@ class SystemTest {
       { name: 'AI Text Rejected Parameter Fallback', test: () => this.testAITextRejectedParameterFallback() },
       { name: 'Timeline Renders Mixed Image Sizes', test: () => this.testTimelineRendersMixedImageSizes() },
       { name: 'Narration Loudness Normalisation', test: () => this.testNarrationLoudnessNormalisation() },
+      { name: 'Scene Timing And Levelling', test: () => this.testSceneTimingAndLevellingFromNarration() },
       { name: 'Publishing Safety', test: () => this.testPublishingSafety() },
       { name: 'Multi-Provider Credential Validation', test: () => this.testCredentialValidation() },
       { name: 'AI Text Service Token Compatibility', test: () => this.testAITextServiceTokenParams() },
@@ -2292,6 +2293,88 @@ class SystemTest {
     }
 
     this.logger.info('Narration loudness normalisation test completed successfully');
+  }
+
+
+  async testSceneTimingAndLevellingFromNarration() {
+    const fsp = require('fs').promises;
+    const os = require('os');
+    const pathMod = require('path');
+    const { SceneRepairService } = require('./utils/scene-repair-service');
+    const { runFFmpeg, checkFFmpeg } = require('./utils/ffmpeg');
+
+    const service = new SceneRepairService({}, {}, { logger: { info: () => {}, warn: () => {} } });
+
+    // Every voiced scene must be levelled before the scenes are joined, or one
+    // take ends up audibly quieter than its neighbours part way through a video.
+    const graph = service.buildNarrationFilters([
+      { position: 0, duration: 10, audioPath: 'a.mp3', narrationStatus: 'current' },
+      { position: 1, duration: 12, audioPath: null, narrationStatus: 'intentional_silence' },
+      { position: 2, duration: 8, audioPath: 'c.mp3', narrationStatus: 'current' }
+    ]);
+    const chains = graph.split(';');
+    const voiced = [chains[0], chains[2]];
+    for (const chain of voiced) {
+      if (!chain.includes('loudnorm=I=-16')) {
+        throw new Error('A voiced scene reaches concat without being levelled, so takes drift apart audibly');
+      }
+    }
+    if (chains[1].includes('loudnorm')) {
+      throw new Error('A deliberately silent scene was normalised, which only lifts its noise floor');
+    }
+    if (!graph.includes('concat=n=3')) {
+      throw new Error('The narration graph did not join every scene');
+    }
+
+    if (typeof checkFFmpeg === 'function' && !(await checkFFmpeg())) {
+      this.logger.info('Skipping the narration timing pass: FFmpeg is unavailable');
+      return;
+    }
+
+    // Scene durations are a word-count estimate. When they overrun the recording
+    // that exists, the later slices start past the end of the audio and come
+    // back empty, and the finished video holds stills over silence.
+    const dir = await fsp.mkdtemp(pathMod.join(os.tmpdir(), 'scene-timing-'));
+    try {
+      const narration = pathMod.join(dir, 'narration.wav');
+      await runFFmpeg(['-y', '-f', 'lavfi', '-i', 'sine=frequency=220:duration=20', narration]);
+
+      const measured = await service.probeDurationSeconds(narration);
+      if (!measured || Math.abs(measured - 20) > 0.5) {
+        throw new Error(`Expected to read a 20 second recording, read ${measured}`);
+      }
+
+      // Estimates that add up to 50 seconds against 20 seconds of narration.
+      const scenes = [
+        { position: 0, duration: 25, scriptText: 'one' },
+        { position: 1, duration: 25, scriptText: 'two' }
+      ];
+      service.dataRoot = dir;
+      service.videoGenerator = { isUsableAudioFile: async () => true };
+      await service.initializeAudioSegments(
+        { id: 'prod_test', assets: { audio: { path: narration, provider: 'test' } } },
+        scenes
+      );
+
+      const total = scenes.reduce((sum, scene) => sum + Number(scene.duration), 0);
+      if (Math.abs(total - measured) > 1) {
+        throw new Error(`Scene timings still add up to ${total.toFixed(1)}s against ${measured.toFixed(1)}s of narration`);
+      }
+      if (Math.abs(scenes[0].duration - scenes[1].duration) > 0.1) {
+        throw new Error('Scaling did not keep the scenes in proportion to each other');
+      }
+      for (const scene of scenes) {
+        if (!scene.audioPath) throw new Error(`Scene ${scene.position + 1} produced no narration segment`);
+        const stats = await fsp.stat(scene.audioPath);
+        if (stats.size < 1024) {
+          throw new Error(`Scene ${scene.position + 1} was sliced past the end of the recording and is empty`);
+        }
+      }
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+
+    this.logger.info('Scene timing and levelling test completed successfully');
   }
 
 

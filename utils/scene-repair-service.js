@@ -5,6 +5,10 @@ const sharp = require('sharp');
 const { runFFmpeg } = require('./ffmpeg');
 const { ProvenanceService } = require('./provenance-service');
 
+// Scenes are levelled to this before they are joined; the finished mix is
+// normalised again for YouTube when the audio is muxed onto the picture.
+const SCENE_TARGET_LUFS = -16;
+
 const VIDEO_EXTENSIONS = new Set(['.mp4']);
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 
@@ -636,6 +640,22 @@ class SceneRepairService {
     return { productionId, finalVideo: finalPath, previousVideo: previousPath, captions: captionsPath, scenes: scenes.length };
   }
 
+  // Level every scene against its neighbours before joining them. Takes are
+  // recorded and re-recorded at different times and drift apart badly enough to
+  // be audible — video one had an 11.7 dB spread across its scenes — which
+  // leaves the viewer reaching for the volume control part way through.
+  // Deliberately silent scenes are left alone: loudnorm on silence would only
+  // raise the noise floor.
+  buildNarrationFilters(scenes = []) {
+    const chains = scenes.map((scene, index) => {
+      const silent = scene.narrationStatus === 'intentional_silence' || !scene.audioPath;
+      const level = silent ? '' : `loudnorm=I=${SCENE_TARGET_LUFS}:TP=-2:LRA=11,`;
+      return `[${index}:a]aresample=48000,${level}apad,atrim=duration=${Number(scene.duration).toFixed(2)},asetpts=PTS-STARTPTS[a${index}]`;
+    });
+    chains.push(`${scenes.map((_, index) => `[a${index}]`).join('')}concat=n=${scenes.length}:v=0:a=1[aout]`);
+    return chains.join(';');
+  }
+
   async rebuildNarration(productionId, scenes, fallbackAudioPath, timestamp) {
     const hasSceneAudio = scenes.some(scene => scene.audioPath && scene.narrationStatus === 'current');
     const allCurrentWithoutSegments = scenes.every(scene => scene.narrationStatus === 'current' && !scene.audioPath);
@@ -649,9 +669,7 @@ class SceneRepairService {
         args.push('-i', scene.audioPath);
       }
     }
-    const filters = scenes.map((scene, index) => `[${index}:a]aresample=48000,apad,atrim=duration=${Number(scene.duration).toFixed(2)},asetpts=PTS-STARTPTS[a${index}]`);
-    filters.push(`${scenes.map((_, index) => `[a${index}]`).join('')}concat=n=${scenes.length}:v=0:a=1[aout]`);
-    args.push('-filter_complex', filters.join(';'), '-map', '[aout]', '-c:a', 'aac', outputPath);
+    args.push('-filter_complex', this.buildNarrationFilters(scenes), '-map', '[aout]', '-c:a', 'aac', outputPath);
     await runFFmpeg(args);
     return outputPath;
   }
