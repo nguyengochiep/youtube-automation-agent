@@ -7,7 +7,12 @@ const sharp = require('sharp');
 const { Logger } = require('./logger');
 const { runFFmpeg, checkFFmpeg, ffmpegInstallHint } = require('./ffmpeg');
 const { MediaGenerationService } = require('./media-generation-service');
-
+
+// YouTube normalises playback to roughly -14 LUFS and only attenuates uploads
+// that are louder, so anything quieter than this simply plays quieter than the
+// rest of the feed. -1.5 dBTP leaves headroom for lossy codecs.
+const AUDIO_TARGET_LUFS = -14;
+const AUDIO_TRUE_PEAK_DB = -1.5;
 
 class AIVideoGenerator {
   constructor(credentials, options = {}) {
@@ -836,6 +841,26 @@ class AIVideoGenerator {
     return Math.max(30, Math.ceil((totalWords / 150) * 60));
   }
 
+  // Single-pass loudnorm only gets within a couple of LU of the target, which
+  // still leaves narration audibly quieter than the rest of a viewer's feed.
+  // Measure first, then hand the measurements back so the second pass lands on
+  // target. Falls back to a single pass if measurement fails for any reason.
+  async buildLoudnormFilter(audioPath) {
+    const base = `loudnorm=I=${AUDIO_TARGET_LUFS}:TP=${AUDIO_TRUE_PEAK_DB}:LRA=11`;
+    try {
+      const { stderr } = await runFFmpeg(['-hide_banner', '-i', audioPath, '-af', `${base}:print_format=json`, '-f', 'null', '-']);
+      const match = String(stderr || '').match(/\{[\s\S]*\}/);
+      if (!match) return base;
+      const m = JSON.parse(match[0]);
+      const required = ['input_i', 'input_tp', 'input_lra', 'input_thresh', 'target_offset'];
+      if (required.some(key => m[key] === undefined || m[key] === '-inf')) return base;
+      return `${base}:measured_I=${m.input_i}:measured_TP=${m.input_tp}:measured_LRA=${m.input_lra}:measured_thresh=${m.input_thresh}:offset=${m.target_offset}:linear=true`;
+    } catch (error) {
+      this.logger.warn(`Loudness measurement failed, falling back to a single pass: ${error.message}`);
+      return base;
+    }
+  }
+
   async addAudioToVideo(videoPath, audioPath, outputPath, options = {}) {
     const hasRealAudio = await this.isUsableAudioFile(audioPath);
 
@@ -868,7 +893,8 @@ class AIVideoGenerator {
     await runFFmpeg([
       '-y', ...videoInput, '-i', audioPath,
       '-map', '0:v:0', '-map', '1:a:0',
-      '-c:v', 'copy', '-c:a', 'aac',
+      '-af', await this.buildLoudnormFilter(audioPath),
+      '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
       '-movflags', '+faststart', '-shortest', muxPath
     ]);
 

@@ -44,6 +44,7 @@ class SystemTest {
       { name: 'AI Text Transient Retry', test: () => this.testAITextTransientRetry() },
       { name: 'AI Text Rejected Parameter Fallback', test: () => this.testAITextRejectedParameterFallback() },
       { name: 'Timeline Renders Mixed Image Sizes', test: () => this.testTimelineRendersMixedImageSizes() },
+      { name: 'Narration Loudness Normalisation', test: () => this.testNarrationLoudnessNormalisation() },
       { name: 'Publishing Safety', test: () => this.testPublishingSafety() },
       { name: 'Multi-Provider Credential Validation', test: () => this.testCredentialValidation() },
       { name: 'AI Text Service Token Compatibility', test: () => this.testAITextServiceTokenParams() },
@@ -2243,6 +2244,54 @@ class SystemTest {
     }
 
     this.logger.info('Mixed image size timeline test completed successfully');
+  }
+
+
+  async testNarrationLoudnessNormalisation() {
+    const fsp = require('fs').promises;
+    const os = require('os');
+    const pathMod = require('path');
+    const { AIVideoGenerator } = require('./utils/ai-video-generator');
+    const { runFFmpeg, checkFFmpeg } = require('./utils/ffmpeg');
+
+    const generator = new AIVideoGenerator({});
+    generator.logger.warn = () => {};
+    generator.logger.info = () => {};
+
+    // YouTube only attenuates loud uploads, so quiet narration stays quiet and
+    // the video plays softer than everything else in a viewer's feed. Every
+    // filter this builds must therefore carry the broadcast target.
+    const fallback = await generator.buildLoudnormFilter(pathMod.join(os.tmpdir(), 'no-such-audio-file.mp3'));
+    if (!fallback.includes('I=-14')) {
+      throw new Error(`The loudness filter lost its -14 LUFS target: ${fallback}`);
+    }
+    if (!fallback.includes('TP=-1.5')) {
+      throw new Error(`The loudness filter lost its true peak ceiling: ${fallback}`);
+    }
+
+    if (typeof checkFFmpeg === 'function' && !(await checkFFmpeg())) {
+      this.logger.info('Skipping the measured loudness pass: FFmpeg is unavailable');
+      return;
+    }
+
+    const dir = await fsp.mkdtemp(pathMod.join(os.tmpdir(), 'loudness-'));
+    try {
+      // A deliberately quiet tone, the shape of raw text-to-speech output.
+      const quiet = pathMod.join(dir, 'quiet.wav');
+      await runFFmpeg(['-y', '-f', 'lavfi', '-i', 'sine=frequency=220:duration=4', '-af', 'volume=-24dB', quiet]);
+
+      const measured = await generator.buildLoudnormFilter(quiet);
+      if (!measured.includes('measured_I=')) {
+        throw new Error('Loudness was not measured, so the second pass cannot hit the target');
+      }
+      if (!measured.includes('linear=true')) {
+        throw new Error('The measured pass must run linear so it applies the offset it calculated');
+      }
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+
+    this.logger.info('Narration loudness normalisation test completed successfully');
   }
 
 
