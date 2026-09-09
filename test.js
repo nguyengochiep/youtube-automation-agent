@@ -41,6 +41,7 @@ class SystemTest {
       { name: 'API Validation and Security', test: () => this.testAPIValidationAndSecurity() },
       { name: 'Generation Without Strategy Context', test: () => this.testGenerationWithoutStrategyContext() },
       { name: 'Generate Route Forwards Strategy Context', test: () => this.testGenerateRouteForwardsStrategyContext() },
+      { name: 'AI Text Transient Retry', test: () => this.testAITextTransientRetry() },
       { name: 'Publishing Safety', test: () => this.testPublishingSafety() },
       { name: 'Multi-Provider Credential Validation', test: () => this.testCredentialValidation() },
       { name: 'AI Text Service Token Compatibility', test: () => this.testAITextServiceTokenParams() },
@@ -2087,6 +2088,67 @@ class SystemTest {
     }
 
     this.logger.info('Generate route strategy context test completed successfully');
+  }
+
+
+  async testAITextTransientRetry() {
+    const { AITextService } = require('./utils/ai-text-service');
+
+    // A provider blip must be recognised, an invalid request must not be.
+    const transient = [{ status: 503 }, { status: 429 }, { message: 'ECONNRESET' }];
+    for (const error of transient) {
+      if (!AITextService.isTransientError(error)) {
+        throw new Error(`A transient provider error was not recognised: ${JSON.stringify(error)}`);
+      }
+    }
+    const permanent = [{ status: 400, message: 'bad request' }, { status: 401, message: 'invalid api key' }];
+    for (const error of permanent) {
+      if (AITextService.isTransientError(error)) {
+        throw new Error(`A permanent error was treated as retryable: ${JSON.stringify(error)}`);
+      }
+    }
+
+    // A 503 on the first call must be retried rather than surfaced, because the
+    // agents turn any thrown error into silent boilerplate.
+    const service = new AITextService({});
+    service.providerName = 'Test provider';
+    let calls = 0;
+    service._generateOnce = async () => {
+      calls += 1;
+      if (calls === 1) {
+        const error = new Error('This model is currently experiencing high demand');
+        error.status = 503;
+        throw error;
+      }
+      return 'real generated copy';
+    };
+    const text = await service.generateText('prompt', { retryBaseMs: 1 });
+    if (text !== 'real generated copy') {
+      throw new Error(`Retry did not return the successful response, received: ${text}`);
+    }
+    if (calls !== 2) {
+      throw new Error(`Expected exactly one retry after a 503, saw ${calls} calls`);
+    }
+
+    // A bad request must fail immediately instead of burning the retry budget.
+    let permanentCalls = 0;
+    service._generateOnce = async () => {
+      permanentCalls += 1;
+      const error = new Error('bad request');
+      error.status = 400;
+      throw error;
+    };
+    try {
+      await service.generateText('prompt', { retryBaseMs: 1 });
+      throw new Error('A 400 response should not have been swallowed');
+    } catch (error) {
+      if (error.status !== 400) throw error;
+    }
+    if (permanentCalls !== 1) {
+      throw new Error(`A 400 was retried ${permanentCalls} times; it must fail on the first attempt`);
+    }
+
+    this.logger.info('AI text transient retry test completed successfully');
   }
 
 

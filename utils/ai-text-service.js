@@ -100,7 +100,41 @@ class AITextService {
     }
   }
 
+  // Providers return 429/5xx under load. Every agent catches a failed
+  // generateText and quietly falls back to a boilerplate template, so a single
+  // transient blip silently ships filler copy that still passes the pipeline's
+  // checkpoint and quality checks. Retry here, where one fix covers every agent.
+  static isTransientError(error) {
+    const status = Number(error?.status ?? error?.code ?? error?.response?.status);
+    if ([408, 425, 429, 500, 502, 503, 504].includes(status)) return true;
+    const text = String(error?.message || '');
+    if (/\b(429|500|502|503|504)\b/.test(text)) return true;
+    if (/high demand|overloaded|rate limit|temporarily unavailable|try again/i.test(text)) return true;
+    return /ECONNRESET|ECONNREFUSED|EPIPE|ETIMEDOUT|ENETUNREACH|EAI_AGAIN/i.test(text);
+  }
+
   async generateText(prompt, options = {}) {
+    const attempts = Math.max(1, Number(options.maxAttempts ?? this.maxAttempts ?? 3));
+    const baseDelay = Number(options.retryBaseMs ?? 1000);
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        return await this._generateOnce(prompt, options);
+      } catch (error) {
+        lastError = error;
+        if (attempt === attempts || !AITextService.isTransientError(error)) throw error;
+        const wait = baseDelay * 2 ** (attempt - 1);
+        this.logger.warn(
+          `${this.providerName} call failed with a transient error; retrying in ${wait}ms (attempt ${attempt} of ${attempts}).`
+        );
+        await new Promise(resolve => setTimeout(resolve, wait));
+      }
+    }
+    throw lastError;
+  }
+
+  async _generateOnce(prompt, options = {}) {
     const model = options.model || this.model;
     const maxTokens = options.maxTokens || 2048;
     const temperature = options.temperature ?? 0.7;
@@ -154,32 +188,4 @@ class AITextService {
         });
         return this._extractContent(response);
       }
-      throw error;
-    }
-  }
 
-  _extractContent(response) {
-    const content =
-      response &&
-      response.choices &&
-      response.choices[0] &&
-      response.choices[0].message
-        ? response.choices[0].message.content
-        : null;
-
-    if (typeof content !== 'string' || !content.trim()) {
-      // A null/empty body used to surface as cryptic "Unexpected end of JSON input"
-      // in the agents' JSON parsers. Report the real cause instead.
-      throw new Error(
-        `${this.providerName} returned an empty response. Check the API key and model quota.`
-      );
-    }
-    return content;
-  }
-
-  isAvailable() {
-    return !!(this.client || this.gemini);
-  }
-}
-
-module.exports = { AITextService, PROVIDERS, GEMINI_MODELS, GEMINI_DEFAULT_MODEL };
