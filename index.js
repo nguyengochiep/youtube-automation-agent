@@ -235,7 +235,7 @@ class YouTubeAutomationAgent {
       topic: null,
       style: null,
       length: typeof body.length === 'string' ? body.length.toLowerCase() : 'medium',
-      strategyContext: null
+      strategyContext: {}
     };
 
     // JSON has no `undefined`, so clients send `null` to mean "no value provided".
@@ -408,8 +408,8 @@ class YouTubeAutomationAgent {
           return res.status(validation.status).json({ success: false, error: validation.error });
         }
 
-        const { topic, style, length } = validation.value;
-        const result = await this.startGenerationJob({ topic, style, length, source: 'manual' });
+        const { topic, style, length, strategyContext } = validation.value;
+        const result = await this.startGenerationJob({ topic, style, length, strategyContext, source: 'manual' });
         res.status(202).json({ success: true, result });
       } catch (error) {
         res.status(error.status || 500).json({ success: false, error: error.message });
@@ -1408,7 +1408,11 @@ class YouTubeAutomationAgent {
 
   async generateContent(topic = null, style = null, length = 'medium', options = {}) {
     this.logger.info('Starting content generation pipeline...');
-    const { jobId = null, strategyContext = {} } = options;
+    const { jobId = null } = options;
+    // Callers pass null to mean "no planning context", and a destructuring
+    // default only fires on undefined — coalesce so the strategy stage below
+    // can always read fields off this object.
+    const strategyContext = options.strategyContext || {};
     const profile = await this.db.getChannelProfile() || {};
     const lengthLabels = { short: '2-4 minutes', medium: '8-12 minutes', long: '15-20 minutes' };
 

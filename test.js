@@ -39,6 +39,8 @@ class SystemTest {
       { name: 'DarkzSEO Discoverability Preflight', test: () => this.testDiscoverabilityPreflight() },
       { name: 'Resumable Generation Checkpoints', test: () => this.testResumableGenerationCheckpoints() },
       { name: 'API Validation and Security', test: () => this.testAPIValidationAndSecurity() },
+      { name: 'Generation Without Strategy Context', test: () => this.testGenerationWithoutStrategyContext() },
+      { name: 'Generate Route Forwards Strategy Context', test: () => this.testGenerateRouteForwardsStrategyContext() },
       { name: 'Publishing Safety', test: () => this.testPublishingSafety() },
       { name: 'Multi-Provider Credential Validation', test: () => this.testCredentialValidation() },
       { name: 'AI Text Service Token Compatibility', test: () => this.testAITextServiceTokenParams() },
@@ -1970,6 +1972,123 @@ class SystemTest {
 
     this.logger.info('Resumable generation checkpoints test completed successfully');
   }
+
+  async testGenerationWithoutStrategyContext() {
+    const { YouTubeAutomationAgent } = require('./index');
+    const agent = new YouTubeAutomationAgent();
+
+    // A request that carries no planning context must still produce an object,
+    // because the strategy stage reads fields straight off it.
+    const plain = agent.validateGenerateRequestBody({ topic: 'Vietnamese mythology', style: 'story' });
+    if (!plain.valid) {
+      throw new Error('A generate request without strategyContext was rejected');
+    }
+    if (!plain.value.strategyContext || typeof plain.value.strategyContext !== 'object') {
+      throw new Error('strategyContext defaulted to a non-object, which crashes the strategy stage');
+    }
+
+    // A caller that passes null explicitly must be tolerated too: a destructuring
+    // default only fires on undefined, so null used to reach the strategy stage
+    // and throw "Cannot read properties of null (reading 'angle')".
+    const STOP = 'STOP_AFTER_STRATEGY';
+    agent.db = { getChannelProfile: async () => ({}) };
+    agent.agents = {
+      strategy: {
+        generateContentStrategy: async topic => ({ topic: topic || 'fallback', angle: 'original angle' })
+      }
+    };
+    agent.runGenerationStage = async (jobId, stage, progress, run) => {
+      const artifact = await run();
+      const stop = new Error(STOP);
+      stop.artifact = artifact;
+      throw stop;
+    };
+
+    let captured = null;
+    try {
+      await agent.generateContent('Vietnamese mythology', 'story', 'medium', { strategyContext: null });
+      throw new Error('The stubbed strategy stage should have stopped the pipeline');
+    } catch (error) {
+      if (error.message !== STOP) {
+        throw new Error(`Strategy stage failed with a null strategyContext: ${error.message}`);
+      }
+      captured = error.artifact;
+    }
+
+    if (!captured || captured.angle !== 'original angle') {
+      throw new Error('The strategy artifact lost its angle when strategyContext was null');
+    }
+    if (captured.requestedLength !== '8-12 minutes') {
+      throw new Error(`Expected the medium length label, received ${captured.requestedLength}`);
+    }
+
+    this.logger.info('Generation without strategy context test completed successfully');
+  }
+
+
+  async testGenerateRouteForwardsStrategyContext() {
+    const { YouTubeAutomationAgent } = require('./index');
+    const agent = new YouTubeAutomationAgent();
+
+    // The route used to destructure only topic/style/length, so a caller's
+    // planning context was validated and then silently dropped, leaving the
+    // strategy stage to invent its own angle.
+    let received = null;
+    agent.startGenerationJob = async input => {
+      received = input;
+      return { id: 'job_test', status: 'queued' };
+    };
+    agent.isInitialized = true;
+    agent.setupRequired = false;
+    agent.setupAPI();
+
+    const server = await new Promise(resolve => {
+      const listener = agent.app.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+
+    try {
+      const { port } = server.address();
+      const angle = 'Not a love story but an invented tradition.';
+      const constraints = 'State nothing as settled fact that is not attested in a pre-modern text.';
+      const headers = { 'Content-Type': 'application/json' };
+      // requireAPIKey() is a no-op when API_KEY is unset, but this repo's own
+      // .env usually sets one, so authenticate when it is configured.
+      if (process.env.API_KEY) headers['x-api-key'] = process.env.API_KEY;
+      const response = await fetch(`http://127.0.0.1:${port}/generate`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          topic: 'Vietnamese creation myth',
+          style: 'story',
+          length: 'medium',
+          strategyContext: { angle, constraints, pillar: 'Mythology' }
+        })
+      });
+      if (response.status !== 202) {
+        throw new Error(`Expected 202 from /generate, received ${response.status}`);
+      }
+      if (!received) {
+        throw new Error('The route never reached startGenerationJob');
+      }
+      if (!received.strategyContext) {
+        throw new Error('The route dropped strategyContext before starting the job');
+      }
+      if (received.strategyContext.angle !== angle) {
+        throw new Error(`The angle did not survive the route: ${received.strategyContext.angle}`);
+      }
+      if (received.strategyContext.constraints !== constraints) {
+        throw new Error('The constraints did not survive the route');
+      }
+      if (received.strategyContext.pillar !== 'Mythology') {
+        throw new Error('The pillar did not survive the route');
+      }
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+    }
+
+    this.logger.info('Generate route strategy context test completed successfully');
+  }
+
 
   async testAPIValidationAndSecurity() {
     const { YouTubeAutomationAgent } = require('./index');
