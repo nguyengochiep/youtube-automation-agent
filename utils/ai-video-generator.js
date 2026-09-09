@@ -7,6 +7,7 @@ const sharp = require('sharp');
 const { Logger } = require('./logger');
 const { runFFmpeg, checkFFmpeg, ffmpegInstallHint } = require('./ffmpeg');
 const { MediaGenerationService } = require('./media-generation-service');
+
 
 class AIVideoGenerator {
   constructor(credentials, options = {}) {
@@ -405,18 +406,41 @@ class AIVideoGenerator {
     return outputPath;
   }
 
-  async renderMediaTimeline(segments, outputPath) {
+  // Every chain normalises the sample aspect ratio before concat. Sources of
+  // differing pixel dimensions declare different SARs — a JPEG carries a JFIF
+  // density, a PNG carries none — and without setsar=1 the concat filter
+  // refuses to configure ("parameters do not match the corresponding output
+  // link") and no video is written at all.
+  buildTimelineFilters(segments = []) {
+    const chains = segments.map((segment, index) =>
+      `[${index}:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=30,format=yuv420p,trim=duration=${Number(segment.duration).toFixed(2)},setpts=PTS-STARTPTS[v${index}]`
+    );
+    chains.push(`${segments.map((_, index) => `[v${index}]`).join('')}concat=n=${segments.length}:v=1:a=0[vout]`);
+    return chains.join(';');
+  }
+
+  buildTimelineArgs(segments = [], outputPath) {
     const args = ['-y'];
     for (const segment of segments) {
       if (segment.type === 'image') args.push('-loop', '1', '-t', Number(segment.duration).toFixed(2), '-framerate', '30', '-i', segment.path);
       else args.push('-stream_loop', '-1', '-i', segment.path);
     }
-    const filters = segments.map((segment, index) =>
-      `[${index}:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,fps=30,format=yuv420p,trim=duration=${Number(segment.duration).toFixed(2)},setpts=PTS-STARTPTS[v${index}]`
+    args.push(
+      '-filter_complex', this.buildTimelineFilters(segments),
+      '-map', '[vout]',
+      '-c:v', 'libx264',
+      '-pix_fmt', 'yuv420p',
+      // Without faststart the moov atom lands at the end of the file, so the
+      // review player has to download the whole video before it shows a frame
+      // and the operator cannot watch what they are being asked to approve.
+      '-movflags', '+faststart',
+      outputPath
     );
-    filters.push(`${segments.map((_, index) => `[v${index}]`).join('')}concat=n=${segments.length}:v=1:a=0[vout]`);
-    args.push('-filter_complex', filters.join(';'), '-map', '[vout]', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', outputPath);
-    await runFFmpeg(args);
+    return args;
+  }
+
+  async renderMediaTimeline(segments, outputPath) {
+    await runFFmpeg(this.buildTimelineArgs(segments, outputPath));
     return outputPath;
   }
 
@@ -534,7 +558,7 @@ class AIVideoGenerator {
     }
 
     if (stills.length === 1) {
-      args.push('-vf', 'format=yuv420p', '-c:v', 'libx264', videoPath);
+      args.push('-vf', 'format=yuv420p', '-c:v', 'libx264', '-movflags', '+faststart', videoPath);
       await runFFmpeg(args);
       return videoPath;
     }
@@ -555,6 +579,7 @@ class AIVideoGenerator {
       '-map', '[vfinal]',
       '-c:v', 'libx264',
       '-r', '30',
+      '-movflags', '+faststart',
       videoPath
     );
 
@@ -831,7 +856,21 @@ class AIVideoGenerator {
       : outputPath;
 
     const videoInput = options.loopVideo ? ['-stream_loop', '-1', '-i', videoPath] : ['-i', videoPath];
-    await runFFmpeg(['-y', ...videoInput, '-i', audioPath, '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-shortest', muxPath]);
+    // This mux writes the file the operator actually reviews and publishes, so
+    // it needs faststart too: a stream copy would otherwise leave the moov atom
+    // at the end and the review player would show nothing until the whole file
+    // had downloaded.
+    //
+    // Narration also has to be normalised here. YouTube plays everything at
+    // about -14 LUFS but only ever turns loud uploads down, never quiet ones
+    // up, so raw text-to-speech output lands several LU below every other video
+    // in the feed and viewers reach for the volume control.
+    await runFFmpeg([
+      '-y', ...videoInput, '-i', audioPath,
+      '-map', '0:v:0', '-map', '1:a:0',
+      '-c:v', 'copy', '-c:a', 'aac',
+      '-movflags', '+faststart', '-shortest', muxPath
+    ]);
 
     if (muxPath !== outputPath) {
       await fs.rename(muxPath, outputPath);

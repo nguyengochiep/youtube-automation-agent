@@ -43,6 +43,7 @@ class SystemTest {
       { name: 'Generate Route Forwards Strategy Context', test: () => this.testGenerateRouteForwardsStrategyContext() },
       { name: 'AI Text Transient Retry', test: () => this.testAITextTransientRetry() },
       { name: 'AI Text Rejected Parameter Fallback', test: () => this.testAITextRejectedParameterFallback() },
+      { name: 'Timeline Renders Mixed Image Sizes', test: () => this.testTimelineRendersMixedImageSizes() },
       { name: 'Publishing Safety', test: () => this.testPublishingSafety() },
       { name: 'Multi-Provider Credential Validation', test: () => this.testCredentialValidation() },
       { name: 'AI Text Service Token Compatibility', test: () => this.testAITextServiceTokenParams() },
@@ -2193,6 +2194,55 @@ class SystemTest {
     }
 
     this.logger.info('AI text rejected parameter fallback test completed successfully');
+  }
+
+
+  async testTimelineRendersMixedImageSizes() {
+    const { AIVideoGenerator } = require('./utils/ai-video-generator');
+    const generator = new AIVideoGenerator({});
+
+    // A JPEG carries a JFIF density and a PNG carries none, so stills of
+    // differing pixel dimensions reach concat declaring different sample
+    // aspect ratios. Without setsar=1 the filter graph refuses to configure
+    // and FFmpeg writes no video at all.
+    const graph = generator.buildTimelineFilters([
+      { type: 'image', path: 'wide.png', duration: 1 },
+      { type: 'image', path: 'small.jpg', duration: 2.5 }
+    ]);
+
+    const chains = graph.split(';');
+    const videoChains = chains.filter(chain => /^\[\d+:v\]/.test(chain));
+    if (videoChains.length !== 2) {
+      throw new Error(`Expected one video chain per segment, found ${videoChains.length}`);
+    }
+    for (const chain of videoChains) {
+      if (!chain.includes('setsar=1')) {
+        throw new Error('A video chain reaches concat without setsar=1, so mixed-size stills render nothing');
+      }
+    }
+    const concatChain = chains.find(chain => chain.includes('concat='));
+    if (!concatChain || !concatChain.includes('n=2')) {
+      throw new Error('The filter graph did not concatenate both segments');
+    }
+    if (!graph.includes('trim=duration=2.50')) {
+      throw new Error('Segment durations were not carried into the filter graph');
+    }
+
+    // Without faststart the moov atom sits at the end of the file and the
+    // review player cannot show a frame until the whole video has downloaded,
+    // so the operator cannot watch what they are approving.
+    const args = generator.buildTimelineArgs([
+      { type: 'image', path: 'wide.png', duration: 1 }
+    ], 'out.mp4');
+    const flagIndex = args.indexOf('-movflags');
+    if (flagIndex === -1 || args[flagIndex + 1] !== '+faststart') {
+      throw new Error('Rendered timelines omit -movflags +faststart, so the review player cannot stream them');
+    }
+    if (args[args.length - 1] !== 'out.mp4') {
+      throw new Error('The output path must remain the final FFmpeg argument');
+    }
+
+    this.logger.info('Mixed image size timeline test completed successfully');
   }
 
 
