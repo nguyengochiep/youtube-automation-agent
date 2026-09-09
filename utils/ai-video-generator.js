@@ -861,6 +861,21 @@ class AIVideoGenerator {
     }
   }
 
+  // Background music is opt-in and silently skipped when unset or missing, so a
+  // typo in the path never turns into a video that quietly ships without the bed
+  // the operator expected — it is logged instead.
+  async resolveBackgroundMusic(explicitPath) {
+    const candidate = explicitPath || process.env.BACKGROUND_MUSIC_PATH || null;
+    if (!candidate) return null;
+    try {
+      await fs.access(candidate);
+      return candidate;
+    } catch {
+      this.logger.warn(`Background music was configured but no file exists at ${candidate}; continuing without a music bed.`);
+      return null;
+    }
+  }
+
   async addAudioToVideo(videoPath, audioPath, outputPath, options = {}) {
     const hasRealAudio = await this.isUsableAudioFile(audioPath);
 
@@ -890,13 +905,39 @@ class AIVideoGenerator {
     // about -14 LUFS but only ever turns loud uploads down, never quiet ones
     // up, so raw text-to-speech output lands several LU below every other video
     // in the feed and viewers reach for the volume control.
-    await runFFmpeg([
-      '-y', ...videoInput, '-i', audioPath,
-      '-map', '0:v:0', '-map', '1:a:0',
-      '-af', await this.buildLoudnormFilter(audioPath),
-      '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
-      '-movflags', '+faststart', '-shortest', muxPath
-    ]);
+    const loudnorm = await this.buildLoudnormFilter(audioPath);
+    const musicPath = await this.resolveBackgroundMusic(options.backgroundMusicPath);
+
+    if (musicPath) {
+      // The bed loops at one steady level from the first frame to the last.
+      // Ducking under the narration was tried and rejected: with speech running
+      // almost end to end the level never settled and the pumping was audible.
+      // Holding the music constant and low is the calmer choice, and how low is
+      // the operator's call via BACKGROUND_MUSIC_GAIN_DB.
+      const gain = Number(process.env.BACKGROUND_MUSIC_GAIN_DB || -22);
+      const stereo = 'aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo';
+      const graph = [
+        `[1:a]${loudnorm},${stereo}[narr]`,
+        `[2:a]volume=${gain}dB,${stereo}[bed]`,
+        '[bed][narr]amix=inputs=2:duration=shortest:normalize=0[aout]'
+      ].join(';');
+      await runFFmpeg([
+        '-y', ...videoInput, '-i', audioPath, '-stream_loop', '-1', '-i', musicPath,
+        '-filter_complex', graph,
+        '-map', '0:v:0', '-map', '[aout]',
+        '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+        '-movflags', '+faststart', '-shortest', muxPath
+      ]);
+      this.logger.info(`Mixed a constant background music bed at ${gain} dB under the narration.`);
+    } else {
+      await runFFmpeg([
+        '-y', ...videoInput, '-i', audioPath,
+        '-map', '0:v:0', '-map', '1:a:0',
+        '-af', loudnorm,
+        '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+        '-movflags', '+faststart', '-shortest', muxPath
+      ]);
+    }
 
     if (muxPath !== outputPath) {
       await fs.rename(muxPath, outputPath);
