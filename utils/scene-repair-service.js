@@ -143,6 +143,27 @@ class SceneRepairService {
     return saved;
   }
 
+  // Returns the playable length of a media file in seconds, or null when it
+  // cannot be read — callers treat that as "leave the estimate alone".
+  async probeDurationSeconds(file) {
+    if (!file) return null;
+    try {
+      const { stderr } = await runFFmpeg(['-hide_banner', '-i', file]);
+      return this.parseDuration(stderr);
+    } catch (error) {
+      // FFmpeg exits non-zero when given no output target, but still prints the
+      // duration it read, so the error path is the normal one here.
+      return this.parseDuration(error.stderr);
+    }
+  }
+
+  parseDuration(stderr) {
+    const match = String(stderr || '').match(/Duration:\s*(\d+):(\d+):([\d.]+)/);
+    if (!match) return null;
+    const seconds = Number(match[1]) * 3600 + Number(match[2]) * 60 + parseFloat(match[3]);
+    return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+  }
+
   async initializeAudioSegments(production, scenes) {
     const audioPath = production.assets?.audio?.path;
     const audio = production.assets?.audio || {};
@@ -155,6 +176,27 @@ class SceneRepairService {
     }
     const directory = path.join(this.dataRoot, 'audio', 'scenes', production.id);
     await fs.mkdir(directory, { recursive: true });
+
+    // Scene durations arrive as a word-count estimate, but the narration is one
+    // recording that gets sliced at those boundaries. When the estimate runs
+    // long the last slices start past the end of the audio and come back empty,
+    // and the finished video holds still images over silence. Scale the
+    // estimates so they add up to the recording that actually exists, keeping
+    // their relative proportions.
+    const spoken = await this.probeDurationSeconds(audioPath);
+    const estimated = scenes.reduce((sum, scene) => sum + Number(scene.duration || 0), 0);
+    if (spoken && estimated > 0) {
+      const scale = spoken / estimated;
+      if (Math.abs(scale - 1) > 0.02) {
+        for (const scene of scenes) {
+          scene.duration = Math.max(2, Number((Number(scene.duration) * scale).toFixed(2)));
+        }
+        this.logger.info(
+          `Scaled scene timings by ${scale.toFixed(3)} so ${estimated.toFixed(1)}s of estimated scenes match the ${spoken.toFixed(1)}s of narration that exists.`
+        );
+      }
+    }
+
     let start = 0;
     for (const scene of scenes) {
       const output = path.join(directory, `${String(scene.position).padStart(3, '0')}_r1.mp3`);
