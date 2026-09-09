@@ -42,6 +42,7 @@ class SystemTest {
       { name: 'Generation Without Strategy Context', test: () => this.testGenerationWithoutStrategyContext() },
       { name: 'Generate Route Forwards Strategy Context', test: () => this.testGenerateRouteForwardsStrategyContext() },
       { name: 'AI Text Transient Retry', test: () => this.testAITextTransientRetry() },
+      { name: 'AI Text Rejected Parameter Fallback', test: () => this.testAITextRejectedParameterFallback() },
       { name: 'Publishing Safety', test: () => this.testPublishingSafety() },
       { name: 'Multi-Provider Credential Validation', test: () => this.testCredentialValidation() },
       { name: 'AI Text Service Token Compatibility', test: () => this.testAITextServiceTokenParams() },
@@ -2149,6 +2150,49 @@ class SystemTest {
     }
 
     this.logger.info('AI text transient retry test completed successfully');
+  }
+
+
+  async testAITextRejectedParameterFallback() {
+    const { AITextService } = require('./utils/ai-text-service');
+    const service = new AITextService({});
+    service.providerName = 'Test provider';
+
+    // Reasoning models reject an explicit temperature with a 400. Without a
+    // retry that drops it, every agent falls back to its boilerplate template.
+    const seen = [];
+    service.client = {
+      chat: {
+        completions: {
+          create: async params => {
+            seen.push(params);
+            if ('temperature' in params) {
+              const error = new Error("Unsupported value: 'temperature' does not support 0.7 with this model.");
+              error.status = 400;
+              throw error;
+            }
+            return { choices: [{ message: { content: 'real generated copy' } }] };
+          }
+        }
+      }
+    };
+    service.gemini = null;
+
+    const text = await service.generateText('prompt', { temperature: 0.7, retryBaseMs: 1 });
+    if (text !== 'real generated copy') {
+      throw new Error(`A temperature rejection was not recovered, received: ${text}`);
+    }
+    if (seen.length !== 2) {
+      throw new Error(`Expected one retry without temperature, saw ${seen.length} requests`);
+    }
+    if ('temperature' in seen[1]) {
+      throw new Error('The retry still carried the rejected temperature parameter');
+    }
+    if (seen[1].max_completion_tokens == null) {
+      throw new Error('The retry dropped the token budget along with the temperature');
+    }
+
+    this.logger.info('AI text rejected parameter fallback test completed successfully');
   }
 
 

@@ -188,4 +188,47 @@ class AITextService {
         });
         return this._extractContent(response);
       }
+      // Reasoning models (the gpt-5 family and later) accept only the default
+      // temperature and reject any explicit value. Drop it and try once more,
+      // otherwise every agent falls back to its boilerplate template.
+      if (
+        error &&
+        error.status === 400 &&
+        /temperature/i.test(error.message || '')
+      ) {
+        const { temperature: _dropped, ...withoutTemperature } = params;
+        const response = await this.client.chat.completions.create({
+          ...withoutTemperature,
+          max_completion_tokens: maxTokens,
+        });
+        return this._extractContent(response);
+      }
+      throw error;
+    }
+  }
 
+  _extractContent(response) {
+    const content =
+      response &&
+      response.choices &&
+      response.choices[0] &&
+      response.choices[0].message
+        ? response.choices[0].message.content
+        : null;
+
+    if (typeof content !== 'string' || !content.trim()) {
+      // A null/empty body used to surface as cryptic "Unexpected end of JSON input"
+      // in the agents' JSON parsers. Report the real cause instead.
+      throw new Error(
+        `${this.providerName} returned an empty response. Check the API key and model quota.`
+      );
+    }
+    return content;
+  }
+
+  isAvailable() {
+    return !!(this.client || this.gemini);
+  }
+}
+
+module.exports = { AITextService, PROVIDERS, GEMINI_MODELS, GEMINI_DEFAULT_MODEL };
