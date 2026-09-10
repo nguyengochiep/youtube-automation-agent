@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Broke the section-length anchor in the script prompt: its shape example showed a single section at `"duration": 60`, and the model copied that number into every section, so the first published video came back as six identical sixty-second blocks of three bullets each
+- Added pacing instructions that tie section length to the material it carries, forbid a repeating pattern of lengths, and forbid a recap section before the conclusion
+- Extracted `buildScriptPrompt` so the wording can be asserted in tests
 - Removed the invented narrator credentials the script opening emitted on every video ("I've spent months researching this topic", "After working with hundreds of people on this", "Based on the latest research and data"), which the AI prompt already forbade the model from writing
 - Dropped the greeting and the title restatement from the opening, and let the model write the two or three sentences after the hook via a new `opening` field in the script contract
 - Credibility is now claimed only when the research stage supplied a named source, and it names that source; a source with only a URL stays silent

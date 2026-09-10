@@ -48,6 +48,7 @@ class SystemTest {
       { name: 'Scene Timing And Levelling', test: () => this.testSceneTimingAndLevellingFromNarration() },
       { name: 'Description Chapters Follow Scene Timings', test: () => this.testDescriptionChaptersFollowSceneTimings() },
       { name: 'Opening And CTA Carry No Invented Credentials', test: () => this.testOpeningAndCTACarryNoInventedCredentials() },
+      { name: 'Script Pacing Is Not Anchored Flat', test: () => this.testScriptPacingIsNotAnchoredFlat() },
       { name: 'Publishing Safety', test: () => this.testPublishingSafety() },
       { name: 'Multi-Provider Credential Validation', test: () => this.testCredentialValidation() },
       { name: 'AI Text Service Token Compatibility', test: () => this.testAITextServiceTokenParams() },
@@ -2295,6 +2296,70 @@ class SystemTest {
     }
 
     this.logger.info('Narration loudness normalisation test completed successfully');
+  }
+
+
+  async testScriptPacingIsNotAnchoredFlat() {
+    const { ScriptWriterAgent } = require('./agents/script-writer-agent');
+    const agent = new ScriptWriterAgent(this.db, {});
+    agent.logger.info = () => {};
+
+    const prompt = agent.buildScriptPrompt(
+      { topic: 'T', contentType: 'Story', requestedLength: '8-12 minutes' },
+      { tone: 'narrative', pacing: 'measured' }
+    );
+
+    // The shape example used to show one section at "duration": 60, and the
+    // model copied that number into every section it wrote: the first published
+    // video came back as six identical sixty-second blocks of three bullets.
+    // Two examples of different lengths is what breaks the anchor, so a single
+    // example must never come back.
+    const durations = [...prompt.matchAll(/"duration":\s*(\d+)/g)].map(match => Number(match[1]));
+    if (durations.length < 2) {
+      throw new Error('The shape example shows one section duration again, which anchors every section to it');
+    }
+    if (new Set(durations).size < 2) {
+      throw new Error(`Every example section shows the same duration (${durations.join(', ')}), which is the anchor itself`);
+    }
+
+    const bulletCounts = [...prompt.matchAll(/"content":\s*\[([^\]]*)\]/g)]
+      .map(match => match[1].split(',').length);
+    if (new Set(bulletCounts).size < 2) {
+      throw new Error('The example sections all carry the same number of bullets');
+    }
+
+    for (const rule of ['do not spread the content evenly', 'repeating pattern of lengths', 'twice the material']) {
+      if (!prompt.toLowerCase().includes(rule)) {
+        throw new Error(`The pacing instruction lost "${rule}"`);
+      }
+    }
+    if (!/summary or recap section before the conclusion/i.test(prompt)) {
+      throw new Error('The prompt no longer forbids a mid-video recap, which reads to a viewer as the ending');
+    }
+
+    // Varied lengths the model returns must survive normalisation. The default
+    // of 60 applies only where a duration is missing, never over a real one.
+    const sections = agent.normalizeAISections([
+      { title: 'A', content: ['one', 'two'], duration: 45 },
+      { title: 'B', content: ['one', 'two', 'three', 'four'], duration: 90 },
+      { title: 'C', content: ['one'], duration: 30 },
+      { title: 'D', content: ['one', 'two', 'three'] }
+    ], { topic: 'T' });
+
+    const kept = sections.map(section => section.duration);
+    if (kept.slice(0, 3).join(',') !== '45,90,30') {
+      throw new Error(`Normalisation flattened the section durations: ${kept.join(', ')}`);
+    }
+    if (kept[3] !== 60) {
+      throw new Error('A section with no duration should fall back to 60, not to zero');
+    }
+
+    const bullets = sections.map(section => section.content.length);
+    if (bullets.join(',') !== '2,4,1,3') {
+      throw new Error(`Normalisation changed how much material each section carries: ${bullets.join(', ')}`);
+    }
+
+    this.logger.info('Script pacing anchor test completed successfully');
   }
 
 

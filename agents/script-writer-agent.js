@@ -100,20 +100,23 @@ class ScriptWriterAgent {
     }
   }
 
-  async generateScriptWithAI(strategy, template) {
-    if (!this.aiTextService.isAvailable()) {
-      this.logger.info('Using template script generation because no AI text provider is configured');
-      return null;
-    }
-
-    const prompt = `You are writing a YouTube script plan.
+  /**
+   * Kept apart from the request so the wording can be asserted in tests. The
+   * shape example carries two sections of different lengths on purpose: a
+   * single example with one duration anchored every section the model wrote to
+   * that number, and the first published video came back as six identical
+   * sixty-second blocks with three bullets each.
+   */
+  buildScriptPrompt(strategy, template) {
+    return `You are writing a YouTube script plan.
 Return only valid JSON with this exact shape:
 {
   "title": "compelling title under 100 characters",
   "hook": "opening hook in one sentence",
   "opening": ["two or three sentences that follow the hook", "no greeting, no channel name, no restatement of the title"],
   "sections": [
-    { "title": "section title", "content": ["spoken script bullet"], "duration": 60 }
+    { "title": "section title", "content": ["spoken script bullet", "another bullet"], "duration": 45 },
+    { "title": "next section title", "content": ["one longer bullet"], "duration": 75 }
   ],
   "cta": "clear call to action",
   "claims": [
@@ -136,7 +139,18 @@ Channel constraints: ${strategy.channelConstraints || 'none beyond the factual-s
 Preferred call to action: ${strategy.callToAction || 'invite the viewer to subscribe'}
 Keywords: ${(strategy.keywords || []).join(', ')}
 Research sources: ${JSON.stringify(strategy.researchSources || [])}
-Avoid fabricated statistics, unsupported claims, and fake urgency. Never claim personal experience, research effort, or credentials on the narrator's behalf. Do not open with a greeting, the channel name, "in this video", or "by the end of this video". List every externally verifiable factual claim in claims. Use only exact URLs from Research sources; use an empty sourceUrls array when the supplied sources do not support a claim.`;
+Avoid fabricated statistics, unsupported claims, and fake urgency. Never claim personal experience, research effort, or credentials on the narrator's behalf. Do not open with a greeting, the channel name, "in this video", or "by the end of this video".
+Let the material decide how long each section runs, between 30 and 90 seconds. A section that establishes a single fact should be short and carry one or two bullets; a section that walks through conflicting evidence should be long and carry four or five. Do not spread the content evenly, and do not cycle through a repeating pattern of lengths: the longest section should carry at least twice the material of the shortest. End each section on a sentence that opens the next question rather than one that concludes. Do not write a summary or recap section before the conclusion; a viewer who is told the video is wrapping up stops watching.
+List every externally verifiable factual claim in claims. Use only exact URLs from Research sources; use an empty sourceUrls array when the supplied sources do not support a claim.`;
+  }
+
+  async generateScriptWithAI(strategy, template) {
+    if (!this.aiTextService.isAvailable()) {
+      this.logger.info('Using template script generation because no AI text provider is configured');
+      return null;
+    }
+
+    const prompt = this.buildScriptPrompt(strategy, template);
 
     try {
       const response = await this.aiTextService.generateText(prompt, {
