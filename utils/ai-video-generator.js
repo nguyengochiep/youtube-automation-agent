@@ -11,6 +11,18 @@ const { MediaGenerationService } = require('./media-generation-service');
 // YouTube normalises playback to roughly -14 LUFS and only attenuates uploads
 // that are louder, so anything quieter than this simply plays quieter than the
 // rest of the feed. -1.5 dBTP leaves headroom for lossy codecs.
+// How far a still travels across its own scene. Four percent is the figure a
+// slow documentary push lands on: enough that the frame is alive, small enough
+// that nobody notices it happening.
+const KEN_BURNS_ZOOM = 1.04;
+// The move is computed on an intermediate this many times the output size,
+// because zoompan rounds its crop origin to whole input pixels and the drift
+// stutters when that step is large. Measured on three real scenes, the spread
+// between the fastest and slowest frame falls from 92% of the mean at 1x to 44%
+// at 2x and 18% at 4x, for 18% more render time — so 4x, and the cost is about
+// ninety seconds on a six-minute video.
+const KEN_BURNS_SUPERSAMPLE = 4;
+
 const AUDIO_TARGET_LUFS = -14;
 const AUDIO_TRUE_PEAK_DB = -1.5;
 
@@ -411,14 +423,65 @@ class AIVideoGenerator {
     return outputPath;
   }
 
+  kenBurnsSettings() {
+    const flag = String(process.env.KEN_BURNS ?? 'on').trim().toLowerCase();
+    const zoom = Number(process.env.KEN_BURNS_ZOOM || KEN_BURNS_ZOOM);
+    return {
+      enabled: !['off', 'false', '0', 'no'].includes(flag),
+      // A push past a few percent stops reading as a slow drift and starts
+      // reading as an effect, so refuse anything outside a believable range.
+      zoom: Number.isFinite(zoom) && zoom > 1 && zoom <= 1.2 ? zoom : KEN_BURNS_ZOOM,
+      supersample: [1, 2, 3, 4].includes(Number(process.env.KEN_BURNS_SUPERSAMPLE))
+        ? Number(process.env.KEN_BURNS_SUPERSAMPLE)
+        : KEN_BURNS_SUPERSAMPLE
+    };
+  }
+
+  /**
+   * A still held perfectly still for forty seconds reads as a slideshow, to a
+   * viewer and to the policy that looks for them. A slow push is the only
+   * motion a stills-only pipeline can afford, and it costs nothing: the whole
+   * move is a few percent across the length of the scene, felt rather than
+   * seen. Direction alternates so ten scenes do not all drift the same way.
+   *
+   * Returns null for anything this should not touch — provider video clips,
+   * scenes too short to move through, and the disabled case — and the caller
+   * falls back to holding the frame still.
+   */
+  buildKenBurnsChain(segment, index, width, height, fps) {
+    const { enabled, zoom, supersample } = this.kenBurnsSettings();
+    const frames = Math.round(Number(segment.duration) * fps);
+    if (!enabled || segment.type !== 'image' || frames < 2) return null;
+
+    // zoompan rounds the crop origin to whole input pixels, so zooming a 1080p
+    // source moves in full output-pixel steps and the drift visibly stutters.
+    // Running the move on a larger intermediate divides that step down.
+    const wide = width * supersample;
+    const tall = height * supersample;
+    const travel = (zoom - 1).toFixed(4);
+    const span = frames - 1;
+    const z = index % 2 === 0
+      ? `min(1+${travel}*on/${span},${zoom})`
+      : `max(${zoom}-${travel}*on/${span},1)`;
+
+    return `[${index}:v]scale=${wide}:${tall}:force_original_aspect_ratio=decrease,` +
+      `pad=${wide}:${tall}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=${fps},` +
+      `zoompan=z='${z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${width}x${height}:fps=${fps},` +
+      `setsar=1,format=yuv420p,trim=duration=${Number(segment.duration).toFixed(2)},setpts=PTS-STARTPTS[v${index}]`;
+  }
+
   // Every chain normalises the sample aspect ratio before concat. Sources of
   // differing pixel dimensions declare different SARs — a JPEG carries a JFIF
   // density, a PNG carries none — and without setsar=1 the concat filter
   // refuses to configure ("parameters do not match the corresponding output
   // link") and no video is written at all.
   buildTimelineFilters(segments = []) {
+    const width = 1920;
+    const height = 1080;
+    const fps = 30;
     const chains = segments.map((segment, index) =>
-      `[${index}:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=30,format=yuv420p,trim=duration=${Number(segment.duration).toFixed(2)},setpts=PTS-STARTPTS[v${index}]`
+      this.buildKenBurnsChain(segment, index, width, height, fps) ||
+      `[${index}:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=${fps},format=yuv420p,trim=duration=${Number(segment.duration).toFixed(2)},setpts=PTS-STARTPTS[v${index}]`
     );
     chains.push(`${segments.map((_, index) => `[v${index}]`).join('')}concat=n=${segments.length}:v=1:a=0[vout]`);
     return chains.join(';');

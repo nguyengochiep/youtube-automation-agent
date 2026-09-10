@@ -49,6 +49,7 @@ class SystemTest {
       { name: 'Description Chapters Follow Scene Timings', test: () => this.testDescriptionChaptersFollowSceneTimings() },
       { name: 'Opening And CTA Carry No Invented Credentials', test: () => this.testOpeningAndCTACarryNoInventedCredentials() },
       { name: 'Script Pacing Is Not Anchored Flat', test: () => this.testScriptPacingIsNotAnchoredFlat() },
+      { name: 'Ken Burns Moves Stills Without Breaking Concat', test: () => this.testKenBurnsMovesStillsWithoutBreakingConcat() },
       { name: 'Publishing Safety', test: () => this.testPublishingSafety() },
       { name: 'Multi-Provider Credential Validation', test: () => this.testCredentialValidation() },
       { name: 'AI Text Service Token Compatibility', test: () => this.testAITextServiceTokenParams() },
@@ -2296,6 +2297,100 @@ class SystemTest {
     }
 
     this.logger.info('Narration loudness normalisation test completed successfully');
+  }
+
+
+  async testKenBurnsMovesStillsWithoutBreakingConcat() {
+    const { AIVideoGenerator } = require('./utils/ai-video-generator');
+    const generator = new AIVideoGenerator({});
+    generator.logger.warn = () => {};
+    generator.logger.info = () => {};
+
+    const previous = { ...process.env };
+    try {
+      delete process.env.KEN_BURNS;
+      delete process.env.KEN_BURNS_ZOOM;
+      delete process.env.KEN_BURNS_SUPERSAMPLE;
+
+      const segments = [
+        { type: 'image', path: 'a.png', duration: 6 },
+        { type: 'image', path: 'b.png', duration: 6 },
+        { type: 'video', path: 'c.mp4', duration: 6 },
+        { type: 'image', path: 'd.png', duration: 0.02 }
+      ];
+      const chains = generator.buildTimelineFilters(segments).split(';');
+
+      // A still held perfectly still for a whole scene is what the slideshow
+      // policy looks for, so every image must carry a move.
+      if (!chains[0].includes('zoompan') || !chains[1].includes('zoompan')) {
+        throw new Error('Still images lost their Ken Burns move');
+      }
+
+      // Provider clips already move on their own; zooming them again would
+      // crop the framing the provider chose.
+      if (chains[2].includes('zoompan')) {
+        throw new Error('A provider video clip was given a Ken Burns move');
+      }
+
+      // Too short to travel through: a move needs at least two frames, and
+      // the expression divides by frames - 1.
+      if (chains[3].includes('zoompan')) {
+        throw new Error('A scene too short to move through was still zoomed');
+      }
+      if (/\/0[,)]/.test(chains.join(';'))) {
+        throw new Error('A Ken Burns expression divides by zero');
+      }
+
+      // Ten scenes drifting the same way reads as a mechanical effect.
+      if (!chains[0].includes('min(1+') || !chains[1].includes('max(1.04-')) {
+        throw new Error(`Ken Burns direction does not alternate: ${chains[0]} / ${chains[1]}`);
+      }
+
+      // zoompan rounds its crop origin to whole input pixels, so the move is
+      // computed on a larger intermediate and scaled down.
+      if (!chains[0].includes('scale=7680:4320') || !chains[0].includes('s=1920x1080')) {
+        throw new Error('The supersampled intermediate that keeps the drift smooth is gone');
+      }
+
+      // The concat invariant has to survive: sources of differing pixel
+      // dimensions declare different SARs, and concat refuses to configure.
+      for (const [index, chain] of chains.slice(0, 4).entries()) {
+        if (!chain.includes('setsar=1')) throw new Error(`Chain ${index} lost setsar=1 before concat`);
+        // The one that counts is the last filter to touch the sample aspect
+        // ratio. zoompan rewrites it, so a setsar that only runs before the
+        // zoom leaves concat facing mismatched links again.
+        if (chain.includes('zoompan') && chain.lastIndexOf('setsar=1') < chain.indexOf('zoompan')) {
+          throw new Error(`Chain ${index} normalises the sample aspect ratio before zoompan but not after it`);
+        }
+        if (!chain.includes('format=yuv420p')) throw new Error(`Chain ${index} lost format=yuv420p`);
+        if (!chain.includes('trim=duration=')) throw new Error(`Chain ${index} lost its duration trim`);
+      }
+      if (!chains[chains.length - 1].includes('concat=n=4:v=1:a=0[vout]')) {
+        throw new Error('The concat step no longer joins every segment');
+      }
+
+      // An operator who does not want the move must be able to turn it off.
+      process.env.KEN_BURNS = 'off';
+      const still = generator.buildTimelineFilters(segments).split(';');
+      if (still.some(chain => chain.includes('zoompan'))) {
+        throw new Error('KEN_BURNS=off did not hold the frames still');
+      }
+      if (!still[0].includes('setsar=1') || !still[0].includes('scale=1920:1080')) {
+        throw new Error('The static fallback chain is malformed');
+      }
+
+      // A push past a few percent stops reading as a drift and starts reading
+      // as an effect, so out-of-range values fall back to the default.
+      delete process.env.KEN_BURNS;
+      process.env.KEN_BURNS_ZOOM = '1.9';
+      if (!generator.buildTimelineFilters(segments).includes('1.04')) {
+        throw new Error('An implausible zoom was accepted instead of falling back');
+      }
+    } finally {
+      process.env = previous;
+    }
+
+    this.logger.info('Ken Burns timeline test completed successfully');
   }
 
 

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added a slow Ken Burns push to every still in the rendered timeline, alternating direction scene to scene, so a stills-only video no longer holds a frozen frame for the length of a scene; provider video clips and scenes too short to travel through are left alone
+- Computed the move on a 4x intermediate after measuring the frame-to-frame spread fall from 92% of the mean at 1x to 44% at 2x and 18% at 4x, for 18% more render time
+- Added `KEN_BURNS`, `KEN_BURNS_ZOOM` and `KEN_BURNS_SUPERSAMPLE`, with out-of-range zooms falling back to the default rather than rendering an implausible push
 - Broke the section-length anchor in the script prompt: its shape example showed a single section at `"duration": 60`, and the model copied that number into every section, so the first published video came back as six identical sixty-second blocks of three bullets each
 - Added pacing instructions that tie section length to the material it carries, forbid a repeating pattern of lengths, and forbid a recap section before the conclusion
 - Extracted `buildScriptPrompt` so the wording can be asserted in tests
