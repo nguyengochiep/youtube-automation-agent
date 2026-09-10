@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added `scripts/description.js`, which builds a YouTube description with chapter timestamps accumulated from the scene manifest instead of the fixed grid the SEO agent writes before narration exists
+
 ## v2.10.0 — 2026-08-24
 
 - Added a versioned DarkzSEO discoverability preflight over a shell-free Python stdin/stdout adapter, with explicit unavailable and schema-mismatch states

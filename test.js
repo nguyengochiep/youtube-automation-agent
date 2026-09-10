@@ -46,6 +46,7 @@ class SystemTest {
       { name: 'Timeline Renders Mixed Image Sizes', test: () => this.testTimelineRendersMixedImageSizes() },
       { name: 'Narration Loudness Normalisation', test: () => this.testNarrationLoudnessNormalisation() },
       { name: 'Scene Timing And Levelling', test: () => this.testSceneTimingAndLevellingFromNarration() },
+      { name: 'Description Chapters Follow Scene Timings', test: () => this.testDescriptionChaptersFollowSceneTimings() },
       { name: 'Publishing Safety', test: () => this.testPublishingSafety() },
       { name: 'Multi-Provider Credential Validation', test: () => this.testCredentialValidation() },
       { name: 'AI Text Service Token Compatibility', test: () => this.testAITextServiceTokenParams() },
@@ -2293,6 +2294,109 @@ class SystemTest {
     }
 
     this.logger.info('Narration loudness normalisation test completed successfully');
+  }
+
+
+  async testDescriptionChaptersFollowSceneTimings() {
+    const {
+      buildChapters,
+      buildDescription,
+      cleanAgentDescription,
+      timecode,
+      MIN_CHAPTER_SECONDS
+    } = require('./scripts/description');
+
+    // The shape the pipeline actually produces: a short structural hook, real
+    // body scenes, and a trailing call to action. Durations here are the ones
+    // fitted to the recorded narration, so chapters must accumulate from them.
+    const scenes = [
+      { position: 0, label: 'Hook', duration: 14.2, narrationStatus: 'current' },
+      { position: 1, label: 'Introduction', duration: 45.3, narrationStatus: 'current' },
+      { position: 2, label: 'The Myth', duration: 45.9, narrationStatus: 'current' },
+      { position: 3, label: 'What Early Texts Say', duration: 43.6, narrationStatus: 'current' },
+      { position: 4, label: 'When It Was Written Down', duration: 46.7, narrationStatus: 'current' },
+      { position: 5, label: 'A Sliver', duration: 4.0, narrationStatus: 'current' },
+      { position: 6, label: 'Conclusion', duration: 53.7, narrationStatus: 'current' },
+      { position: 7, label: 'Call to action', duration: 26.8, narrationStatus: 'current' }
+    ];
+    const total = scenes.reduce((sum, scene) => sum + scene.duration, 0);
+
+    const chapters = buildChapters(scenes, 8);
+
+    if (chapters[0].start !== 0) {
+      throw new Error('YouTube ignores a chapter list whose first entry is not at 0:00');
+    }
+    if (chapters[0].title === 'Hook') {
+      throw new Error('The structural hook scene must take the title of the scene it merges into');
+    }
+    if (chapters.some(chapter => chapter.title.toLowerCase() === 'call to action')) {
+      throw new Error('The call to action is not a chapter a viewer should see');
+    }
+    if (chapters.some(chapter => chapter.duration < MIN_CHAPTER_SECONDS)) {
+      throw new Error(`A chapter ran shorter than ${MIN_CHAPTER_SECONDS}s, which YouTube rejects`);
+    }
+
+    // The regression this script exists for: the SEO agent lays chapters out on
+    // a fixed grid before narration exists, so the last one lands past the end
+    // of the file. Every start here must sit inside the real running time.
+    for (const chapter of chapters) {
+      if (chapter.start >= total) {
+        throw new Error(
+          `Chapter "${chapter.title}" starts at ${timecode(chapter.start)} but the video ends at ${timecode(total)}`
+        );
+      }
+    }
+
+    const starts = chapters.map(chapter => chapter.start);
+    if (starts.some((value, index) => index > 0 && value <= starts[index - 1])) {
+      throw new Error(`Chapter start times must increase: ${starts.join(', ')}`);
+    }
+
+    // Merging down to a smaller list must not move the first or last chapter
+    // outside the video either.
+    const fewer = buildChapters(scenes, 4);
+    if (fewer.length > 4) throw new Error(`--max-chapters was not honoured: got ${fewer.length}`);
+    if (fewer[0].start !== 0 || fewer[fewer.length - 1].start >= total) {
+      throw new Error('Merging chapters moved one outside the running time');
+    }
+
+    // The agent also appends its estimated timestamps to the description body.
+    const stripped = cleanAgentDescription(
+      'A real sentence about the myth. Timestamps: 0:00 Introduction 14:50 Conclusion Keywords: a, b'
+    );
+    if (/14:50/.test(stripped.text) || /Timestamps/i.test(stripped.text)) {
+      throw new Error('The agent\'s estimated timestamps leaked into the description body');
+    }
+    if (stripped.strippedLabel !== 'timestamps') {
+      throw new Error('Stripping the agent tail must be reported so the operator knows it happened');
+    }
+
+    // A pending source is evidence the operator has not checked, so it must not
+    // be published as though it were.
+    const bundle = {
+      seo: { description: 'Lead sentence.', tags: ['Vietnam creation myth', 'youtube', 'subscribe'] },
+      script: {},
+      scenes,
+      assets: { finalVideo: { duration: total } },
+      provenance: {
+        sources: [
+          { title: 'Verified work', url: 'https://example.org/verified', status: 'verified' },
+          { title: 'Unchecked work', url: 'https://example.org/pending', status: 'pending' }
+        ]
+      }
+    };
+    const description = buildDescription(bundle, chapters, { includePending: false });
+    if (description.includes('https://example.org/pending')) {
+      throw new Error('An unverified source was published in the description');
+    }
+    if (!description.includes('https://example.org/verified')) {
+      throw new Error('The verified source is missing from the description');
+    }
+    if (/#Youtube|#Subscribe/i.test(description)) {
+      throw new Error('Generic tags must not become hashtags');
+    }
+
+    this.logger.info('Description chapter timing test completed successfully');
   }
 
 
