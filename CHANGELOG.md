@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Removed the invented narrator credentials the script opening emitted on every video ("I've spent months researching this topic", "After working with hundreds of people on this", "Based on the latest research and data"), which the AI prompt already forbade the model from writing
+- Dropped the greeting and the title restatement from the opening, and let the model write the two or three sentences after the hook via a new `opening` field in the script contract
+- Credibility is now claimed only when the research stage supplied a named source, and it names that source; a source with only a URL stays silent
+- Replaced the call-to-action filler that stuffed the whole video title into the comment prompt with a request a viewer of any episode can act on, and left the like and next-video slots empty rather than padded
 - Added `scripts/description.js`, which builds a YouTube description with chapter timestamps accumulated from the scene manifest instead of the fixed grid the SEO agent writes before narration exists
 
 ## v2.10.0 — 2026-08-24

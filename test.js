@@ -47,6 +47,7 @@ class SystemTest {
       { name: 'Narration Loudness Normalisation', test: () => this.testNarrationLoudnessNormalisation() },
       { name: 'Scene Timing And Levelling', test: () => this.testSceneTimingAndLevellingFromNarration() },
       { name: 'Description Chapters Follow Scene Timings', test: () => this.testDescriptionChaptersFollowSceneTimings() },
+      { name: 'Opening And CTA Carry No Invented Credentials', test: () => this.testOpeningAndCTACarryNoInventedCredentials() },
       { name: 'Publishing Safety', test: () => this.testPublishingSafety() },
       { name: 'Multi-Provider Credential Validation', test: () => this.testCredentialValidation() },
       { name: 'AI Text Service Token Compatibility', test: () => this.testAITextServiceTokenParams() },
@@ -2294,6 +2295,124 @@ class SystemTest {
     }
 
     this.logger.info('Narration loudness normalisation test completed successfully');
+  }
+
+
+  async testOpeningAndCTACarryNoInventedCredentials() {
+    const { ScriptWriterAgent } = require('./agents/script-writer-agent');
+    const agent = new ScriptWriterAgent(this.db, {});
+    agent.logger.info = () => {};
+    agent.logger.warn = () => {};
+
+    // Phrases the opening used to emit on every single video: a greeting, a
+    // restatement of the title, and a credential picked at random from a list
+    // of things the narrator had never done.
+    const BANNED = [
+      'welcome back to the channel',
+      "i've spent months researching",
+      'after working with hundreds of people',
+      'based on the latest research and data',
+      'drawing from real-world experience',
+      'using proven methods and strategies',
+      'by the end of this video',
+      "today, we're diving deep"
+    ];
+
+    const strategy = {
+      topic: 'The Dragon and the Fairy',
+      contentType: 'Story',
+      channelValueProposition: 'Southeast Asian history with its sources shown',
+      researchSources: []
+    };
+
+    const assertClean = (label, values) => {
+      const text = values.filter(Boolean).join(' ').toLowerCase();
+      for (const phrase of BANNED) {
+        if (text.includes(phrase)) {
+          throw new Error(`${label} still emits "${phrase}"`);
+        }
+      }
+    };
+
+    // Template path — the one that runs whenever the AI provider is unavailable.
+    const intro = await agent.generateIntroduction(strategy);
+    for (const field of ['greeting', 'topicIntro', 'valueProposition', 'credibility']) {
+      if (typeof intro[field] !== 'string') {
+        throw new Error(`introduction.${field} must stay a string; five callers read it by name`);
+      }
+    }
+    if (intro.greeting !== '') throw new Error('The opening must not greet the viewer');
+    assertClean('The template introduction', Object.values(intro));
+
+    // With no research source there is nothing to claim credibility from.
+    if (intro.credibility !== '') {
+      throw new Error(`Credibility was claimed without a source: "${intro.credibility}"`);
+    }
+
+    // With a real source, it is named so a viewer can check it.
+    const sourced = await agent.generateIntroduction({
+      ...strategy,
+      researchSources: [{ url: 'https://example.org/x', title: 'Đại Việt sử ký toàn thư', publisher: 'Nôm Foundation' }]
+    });
+    if (!sourced.credibility.includes('Nôm Foundation')) {
+      throw new Error(`A supplied source must be named in the opening: "${sourced.credibility}"`);
+    }
+
+    // A bare URL is not a name a listener can use, so it must not be spoken.
+    const urlOnly = await agent.generateIntroduction({
+      ...strategy,
+      researchSources: [{ url: 'https://example.org/x' }]
+    });
+    if (urlOnly.credibility !== '') {
+      throw new Error(`A source with no title must stay silent: "${urlOnly.credibility}"`);
+    }
+
+    // AI path — the opening the model writes is what gets used.
+    const written = await agent.generateIntroduction(strategy, [
+      'The oldest surviving chronicle does not mention the dragon at all.',
+      'Which makes the most Vietnamese story there is younger than the independence it explains.'
+    ]);
+    if (!written.topicIntro.includes('oldest surviving chronicle')) {
+      throw new Error('The model-written opening was discarded in favour of the template');
+    }
+    assertClean('The AI introduction', Object.values(written));
+
+    // Call to action, both paths.
+    const templateCTA = await agent.generateCTA(strategy);
+    const aiCTA = agent.normalizeAICTA({ subscribe: 'Subscribe for the next chronicle.' }, strategy);
+    for (const [label, cta] of [['The template CTA', templateCTA], ['The AI CTA', aiCTA]]) {
+      for (const field of ['subscribe', 'like', 'comment', 'nextVideo']) {
+        if (typeof cta[field] !== 'string') {
+          throw new Error(`${label} dropped ${field}; production assembly would narrate "undefined"`);
+        }
+      }
+      if (cta.comment.includes(strategy.topic)) {
+        throw new Error(`${label} stuffs the title into the comment prompt again`);
+      }
+      assertClean(label, Object.values(cta).filter(value => typeof value === 'string'));
+    }
+
+    // The AI's own line wins over the default.
+    if (aiCTA.subscribe !== 'Subscribe for the next chronicle.') {
+      throw new Error('normalizeAICTA overwrote the line the model supplied');
+    }
+
+    // Empty slots must not reach the rendered script as blank lines.
+    const script = {
+      title: 'T', hook: { text: 'H', duration: '0:00-0:05' },
+      introduction: intro,
+      mainContent: { sections: [{ title: 'S', content: ['line'], duration: 60 }] },
+      conclusion: { recap: ['r'], finalThought: 'f', duration: '20 seconds' },
+      callToAction: templateCTA,
+      duration: '5 minutes', tone: 't', pacing: 'p', keywords: ['k']
+    };
+    const full = agent.formatFullScript(script);
+    if (/\n\n\n/.test(full)) {
+      throw new Error('Empty opening or CTA slots left blank lines in the formatted script');
+    }
+    assertClean('The formatted script', [full]);
+
+    this.logger.info('Opening and CTA credential test completed successfully');
   }
 
 

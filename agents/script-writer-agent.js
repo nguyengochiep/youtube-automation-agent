@@ -111,6 +111,7 @@ Return only valid JSON with this exact shape:
 {
   "title": "compelling title under 100 characters",
   "hook": "opening hook in one sentence",
+  "opening": ["two or three sentences that follow the hook", "no greeting, no channel name, no restatement of the title"],
   "sections": [
     { "title": "section title", "content": ["spoken script bullet"], "duration": 60 }
   ],
@@ -135,7 +136,7 @@ Channel constraints: ${strategy.channelConstraints || 'none beyond the factual-s
 Preferred call to action: ${strategy.callToAction || 'invite the viewer to subscribe'}
 Keywords: ${(strategy.keywords || []).join(', ')}
 Research sources: ${JSON.stringify(strategy.researchSources || [])}
-Avoid fabricated statistics, unsupported claims, and fake urgency. List every externally verifiable factual claim in claims. Use only exact URLs from Research sources; use an empty sourceUrls array when the supplied sources do not support a claim.`;
+Avoid fabricated statistics, unsupported claims, and fake urgency. Never claim personal experience, research effort, or credentials on the narrator's behalf. Do not open with a greeting, the channel name, "in this video", or "by the end of this video". List every externally verifiable factual claim in claims. Use only exact URLs from Research sources; use an empty sourceUrls array when the supplied sources do not support a claim.`;
 
     try {
       const response = await this.aiTextService.generateText(prompt, {
@@ -153,7 +154,7 @@ Avoid fabricated statistics, unsupported claims, and fake urgency. List every ex
       return {
         title: String(parsed.title).slice(0, 100),
         hook: this.normalizeAIHook(parsed.hook),
-        introduction: await this.generateIntroduction(strategy),
+        introduction: await this.generateIntroduction(strategy, parsed.opening),
         mainContent: {
           sections,
           totalDuration: this.calculateSectionsDuration(sections)
@@ -243,26 +244,39 @@ Avoid fabricated statistics, unsupported claims, and fake urgency. List every ex
     })).filter(item => item.text);
   }
 
+  /**
+   * The closing used to fill all four slots whether or not it had anything to
+   * put in them, which produced lines like "Share your experience with" followed
+   * by the entire title — an invitation nobody can act on when the subject is a
+   * fifteenth-century chronicle. Slots with nothing to say are now empty
+   * strings; every consumer reads these by name, so the keys stay.
+   */
   normalizeAICTA(cta, strategy) {
-    if (cta && typeof cta === 'object') {
-      return {
-        type: 'call_to_action',
-        subscribe: String(cta.subscribe || cta.text || `Subscribe for more on ${strategy.topic}.`),
-        like: String(cta.like || 'Like this video if it helped.'),
-        comment: String(cta.comment || `Share your experience with ${strategy.topic} in the comments.`),
-        nextVideo: String(cta.nextVideo || 'Watch the next related video for more context.'),
-        duration: '15 seconds'
-      };
-    }
-
+    const source = cta && typeof cta === 'object' ? cta : { subscribe: cta };
     return {
       type: 'call_to_action',
-      subscribe: String(cta || `Subscribe for more practical videos about ${strategy.topic}.`),
-      like: 'Like this video if it helped.',
-      comment: `Share your experience with ${strategy.topic} in the comments.`,
-      nextVideo: 'Watch the next related video for more context.',
+      subscribe: String(source.subscribe || source.text || this.defaultSubscribeLine(strategy)),
+      like: String(source.like || ''),
+      comment: String(source.comment || this.defaultCommentLine()),
+      nextVideo: String(source.nextVideo || ''),
       duration: '15 seconds'
     };
+  }
+
+  defaultSubscribeLine(strategy) {
+    const promise = String(strategy?.channelValueProposition || '').trim();
+    return promise
+      ? `Subscribe if that is what you want more of: ${promise}`
+      : 'Subscribe if you want the next one.';
+  }
+
+  /**
+   * A comment prompt has to be answerable. Asking for a correction or a missing
+   * source is something a viewer of any episode can actually do, and it is the
+   * one request that matches a channel built on citing its evidence.
+   */
+  defaultCommentLine() {
+    return 'If I have missed a source or got something wrong, put it in the comments and I will read it.';
   }
   async generateTitle(strategy) {
     const templates = [
@@ -344,38 +358,74 @@ Avoid fabricated statistics, unsupported claims, and fake urgency. List every ex
     return stats[Math.floor(Math.random() * stats.length)];
   }
 
-  async generateIntroduction(strategy) {
+  /**
+   * The opening is the fifteen seconds where a viewer decides to stay, and it
+   * used to be spent on a greeting, a restatement of the title, and a randomly
+   * chosen credential the channel had not earned. Those credentials were
+   * invented outright — the same fabrication the AI prompt above forbids the
+   * model from producing — so they are gone rather than reworded.
+   *
+   * What is left says only what the strategy actually knows: what the video
+   * covers, what the viewer gets, and a source attribution that appears only
+   * when the research stage supplied a real source.
+   *
+   * The four field names are load-bearing: production assembly, TTS text,
+   * duration estimation and scene splitting all read them by name, and scripts
+   * already in the database carry the same shape.
+   */
+  async generateIntroduction(strategy, opening = null) {
+    const lines = Array.isArray(opening)
+      ? opening.map(line => String(line || '').trim()).filter(Boolean)
+      : [];
+
+    if (lines.length) {
+      return {
+        greeting: '',
+        topicIntro: lines[0],
+        valueProposition: lines.slice(1).join(' '),
+        credibility: this.getSourceAttribution(strategy),
+        duration: '0:05-0:20'
+      };
+    }
+
     return {
-      greeting: "Hey everyone, welcome back to the channel!",
-      topicIntro: `Today, we're diving deep into ${strategy.topic}.`,
-      valueProposition: `By the end of this video, you'll understand exactly ${this.getValueProposition(strategy)}.`,
-      credibility: this.getCredibilityStatement(strategy),
+      greeting: '',
+      topicIntro: `${strategy.topic}.`,
+      valueProposition: `Here is ${this.getValueProposition(strategy)}.`,
+      credibility: this.getSourceAttribution(strategy),
       duration: '0:05-0:20'
     };
   }
 
   getValueProposition(strategy) {
     const propositions = {
-      'Tutorial': `how to implement ${strategy.topic} step by step`,
-      'Explainer': `what ${strategy.topic} is and why it matters`,
-      'List': `the most important things about ${strategy.topic}`,
-      'Review': `whether ${strategy.topic} is right for you`,
-      'Story': `the incredible journey of ${strategy.topic}`
+      'Tutorial': `how to do it, step by step`,
+      'Explainer': `what it is and why it matters`,
+      'List': `what matters most about it`,
+      'Review': `what it does well and where it falls short`,
+      'Story': `how it happened`
     };
-    
-    return propositions[strategy.contentType] || `everything about ${strategy.topic}`;
+
+    return propositions[strategy.contentType] || `what the record actually shows`;
   }
 
-  getCredibilityStatement(_strategy) {
-    const statements = [
-      "I've spent months researching this topic",
-      "After working with hundreds of people on this",
-      "Based on the latest research and data",
-      "Drawing from real-world experience",
-      "Using proven methods and strategies"
-    ];
-    
-    return statements[Math.floor(Math.random() * statements.length)];
+  /**
+   * Credibility is claimed only when the research stage handed over a source to
+   * claim it from, and it names that source so a viewer can go and check. With
+   * no source there is no sentence: an unsupported credential is worse than
+   * silence, and provenance review would have to strip it out later anyway.
+   */
+  getSourceAttribution(strategy) {
+    for (const item of strategy?.researchSources || []) {
+      const name = typeof item === 'string'
+        ? item
+        : String(item?.publisher || item?.title || '');
+      const trimmed = name.trim();
+      if (trimmed && !/^https?:\/\//i.test(trimmed)) {
+        return `Sources are linked in the description, starting with ${trimmed.slice(0, 120)}.`;
+      }
+    }
+    return '';
   }
 
   async generateMainContent(strategy, template) {
@@ -670,10 +720,10 @@ Avoid fabricated statistics, unsupported claims, and fake urgency. List every ex
   async generateCTA(strategy) {
     return {
       type: 'call_to_action',
-      subscribe: "If you found this helpful, make sure to subscribe and hit the notification bell!",
-      like: "Give this video a thumbs up if you learned something new.",
-      comment: `Let me know in the comments: What's your experience with ${strategy.topic}?`,
-      nextVideo: "Check out this related video for more insights.",
+      subscribe: String(strategy?.callToAction || this.defaultSubscribeLine(strategy)),
+      like: '',
+      comment: this.defaultCommentLine(),
+      nextVideo: '',
       duration: '15 seconds'
     };
   }
@@ -691,10 +741,17 @@ Avoid fabricated statistics, unsupported claims, and fake urgency. List every ex
     
     // Introduction
     fullScript += `[${script.introduction.duration}] INTRODUCTION\n`;
-    fullScript += `${script.introduction.greeting}\n`;
-    fullScript += `${script.introduction.topicIntro}\n`;
-    fullScript += `${script.introduction.valueProposition}\n`;
-    fullScript += `${script.introduction.credibility}\n\n`;
+    // Empty slots are expected now that the opening no longer greets or invents
+    // a credential, so print only the lines that carry something.
+    for (const line of [
+      script.introduction.greeting,
+      script.introduction.topicIntro,
+      script.introduction.valueProposition,
+      script.introduction.credibility
+    ].filter(Boolean)) {
+      fullScript += `${line}\n`;
+    }
+    fullScript += '\n';
     
     // Main Content
     fullScript += 'MAIN CONTENT\n';
@@ -743,10 +800,15 @@ Avoid fabricated statistics, unsupported claims, and fake urgency. List every ex
     
     // Call to Action
     fullScript += `[${script.callToAction.duration}] CALL TO ACTION\n`;
-    fullScript += `${script.callToAction.subscribe}\n`;
-    fullScript += `${script.callToAction.like}\n`;
-    fullScript += `${script.callToAction.comment}\n`;
-    fullScript += `${script.callToAction.nextVideo}\n\n`;
+    for (const line of [
+      script.callToAction.subscribe,
+      script.callToAction.like,
+      script.callToAction.comment,
+      script.callToAction.nextVideo
+    ].filter(Boolean)) {
+      fullScript += `${line}\n`;
+    }
+    fullScript += '\n';
     
     // Metadata
     fullScript += '═'.repeat(50) + '\n';
