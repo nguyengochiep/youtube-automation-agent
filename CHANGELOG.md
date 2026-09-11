@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Stripped the SEO agent's unlabelled timestamp list from generated descriptions: it wrote "0:00 Introduction 2:15 Overview..." straight onto the end of a sentence with no "Timestamps:" label, so it slipped past the existing filter and ran to 16:30 on video two's 3:34 file
 - Gave the script model a word budget taken from the requested length, and sized the token ceiling to it instead of a fixed 1800. On the first measured run spoken words went from about 600 to 671 — still short of the 1300 an 8-12 minute video needs, so length is not solved by this
 - Re-timed a scene to its re-recorded narration: regenerating one scene's narration left the scene at its old duration, and the rebuild trims every take to that duration, so a longer take lost its last words — the first repair on video two came back 2.2 seconds longer than its slot
 - Told the script model that saying a source does not mention something is itself a factual claim, allowed only when the channel constraints state it: two runs of the same video announced that Tang thương ngẫu lục "does not mention a turtle" when the text has one surfacing, taking the sword, and diving

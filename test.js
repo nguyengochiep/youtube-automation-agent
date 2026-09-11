@@ -2884,6 +2884,17 @@ class SystemTest {
       throw new Error('Stripping the agent tail must be reported so the operator knows it happened');
     }
 
+    // And sometimes with no label at all, run straight on from a sentence.
+    const unlabelled = cleanAgentDescription(
+      'How the popular version was shaped later. 0:00 Introduction 2:15 Overview of the chronicle 9:10 The turtle'
+    );
+    if (/2:15|9:10|Introduction/.test(unlabelled.text)) {
+      throw new Error('Unlabelled agent timestamps leaked into the description body');
+    }
+    if (!unlabelled.text.includes('shaped later')) {
+      throw new Error('Stripping unlabelled timestamps removed the prose before them');
+    }
+
     // A pending source is evidence the operator has not checked, so it must not
     // be published as though it were.
     const bundle = {

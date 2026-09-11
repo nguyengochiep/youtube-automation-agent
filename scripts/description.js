@@ -184,13 +184,23 @@ function buildChapters(scenes, maxChapters) {
  */
 const AGENT_TAIL = /(^|\s)(timestamps?|chapters?|keywords?|tags|hashtags|sources)\s*:/i;
 
+// The agent also writes its timestamps with no label at all, straight on the
+// end of a sentence — "...shaped centuries later. 0:00 Introduction 2:15
+// Overview..." — which ran to 9:10 on video two's 3:34 file. Two or more
+// clock times in the body are a chapter list, not prose.
+const UNLABELLED_STAMPS = /(?:^|\s)\d{1,2}:\d{2}(?=\s)/g;
+
 function cleanAgentDescription(value) {
   const raw = String(value || '');
   const match = AGENT_TAIL.exec(raw);
-  return {
-    text: (match ? raw.slice(0, match.index) : raw).replace(/\s+/g, ' ').trim(),
-    strippedLabel: match ? match[2].toLowerCase() : null
-  };
+  let text = match ? raw.slice(0, match.index) : raw;
+  let strippedLabel = match ? match[2].toLowerCase() : null;
+  const stamps = [...text.matchAll(UNLABELLED_STAMPS)];
+  if (stamps.length >= 2) {
+    text = text.slice(0, stamps[0].index);
+    strippedLabel = strippedLabel || 'timestamps';
+  }
+  return { text: text.replace(/\s+/g, ' ').trim(), strippedLabel };
 }
 
 function buildLead(seo, script) {
