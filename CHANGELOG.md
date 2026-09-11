@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Told the script model that saying a source does not mention something is itself a factual claim, allowed only when the channel constraints state it: two runs of the same video announced that Tang thương ngẫu lục "does not mention a turtle" when the text has one surfacing, taking the sword, and diving
 - Stopped every script closing on the same template lines, read aloud in the narration ("practical steps to get started", "keep learning and improving"): the model now writes the closing through a new optional `conclusion` field, and the provider-less template says one sentence instead of listing points it never made
 - Stopped reading each section title into the narration as "Section N: ...", which turned the recording into a spoken table of contents and put words into the audio that no scene's text accounted for
 - Kept the call-to-action scene text to its spoken lines, so captions and re-recorded scene narration no longer carry its `call_to_action` type tag and `15 seconds` duration label

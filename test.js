@@ -51,6 +51,7 @@ class SystemTest {
       { name: 'Script Pacing Is Not Anchored Flat', test: () => this.testScriptPacingIsNotAnchoredFlat() },
       { name: 'Ken Burns Moves Stills Without Breaking Concat', test: () => this.testKenBurnsMovesStillsWithoutBreakingConcat() },
       { name: 'Closing Narration Carries No Template Or Labels', test: () => this.testClosingNarrationCarriesNoTemplateOrLabels() },
+      { name: 'Script Prompt Forbids Unsupported Absence Claims', test: () => this.testScriptPromptForbidsUnsupportedAbsenceClaims() },
       { name: 'Publishing Safety', test: () => this.testPublishingSafety() },
       { name: 'Multi-Provider Credential Validation', test: () => this.testCredentialValidation() },
       { name: 'AI Text Service Token Compatibility', test: () => this.testAITextServiceTokenParams() },
@@ -2298,6 +2299,30 @@ class SystemTest {
     }
 
     this.logger.info('Narration loudness normalisation test completed successfully');
+  }
+
+
+  async testScriptPromptForbidsUnsupportedAbsenceClaims() {
+    const { ScriptWriterAgent } = require('./agents/script-writer-agent');
+    const agent = new ScriptWriterAgent(this.db, {});
+    agent.logger.info = () => {};
+
+    // Two runs of the same video both had the model announce that a source
+    // "does not mention a turtle" when the source plainly has one. An absence
+    // is a claim about a text, and on a channel built on citing its evidence it
+    // needs the same backing as anything the text is said to contain.
+    const prompt = agent.buildScriptPrompt(
+      { topic: 'T', contentType: 'Story' },
+      { tone: 'narrative', pacing: 'measured' }
+    ).toLowerCase();
+    if (!prompt.includes('does not mention something is a factual claim too')) {
+      throw new Error('The prompt no longer treats an absence as a claim that needs backing');
+    }
+    if (!prompt.includes('never say what a source omits or lacks unless the channel constraints state it')) {
+      throw new Error('The prompt no longer ties absence claims to the channel constraints');
+    }
+
+    this.logger.info('Absence claim prompt test completed successfully');
   }
 
 
