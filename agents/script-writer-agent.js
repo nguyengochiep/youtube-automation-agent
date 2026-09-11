@@ -114,6 +114,7 @@ Return only valid JSON with this exact shape:
   "title": "compelling title under 100 characters",
   "hook": "opening hook in one sentence",
   "opening": ["two or three sentences that follow the hook", "no greeting, no channel name, no restatement of the title"],
+  "conclusion": ["two or three sentences that close the video", "answer the question the hook opened; no list of what was covered"],
   "sections": [
     { "title": "section title", "content": ["spoken script bullet", "another bullet"], "duration": 45 },
     { "title": "next section title", "content": ["one longer bullet"], "duration": 75 }
@@ -140,7 +141,7 @@ Preferred call to action: ${strategy.callToAction || 'invite the viewer to subsc
 Keywords: ${(strategy.keywords || []).join(', ')}
 Research sources: ${JSON.stringify(strategy.researchSources || [])}
 Avoid fabricated statistics, unsupported claims, and fake urgency. Never claim personal experience, research effort, or credentials on the narrator's behalf. Do not open with a greeting, the channel name, "in this video", or "by the end of this video".
-Let the material decide how long each section runs, between 30 and 90 seconds. A section that establishes a single fact should be short and carry one or two bullets; a section that walks through conflicting evidence should be long and carry four or five. Do not spread the content evenly, and do not cycle through a repeating pattern of lengths: the longest section should carry at least twice the material of the shortest. End each section on a sentence that opens the next question rather than one that concludes. Do not write a summary or recap section before the conclusion; a viewer who is told the video is wrapping up stops watching.
+Let the material decide how long each section runs, between 30 and 90 seconds. A section that establishes a single fact should be short and carry one or two bullets; a section that walks through conflicting evidence should be long and carry four or five. Do not spread the content evenly, and do not cycle through a repeating pattern of lengths: the longest section should carry at least twice the material of the shortest. End each section on a sentence that opens the next question rather than one that concludes. Do not write a summary or recap section before the conclusion; a viewer who is told the video is wrapping up stops watching. Close with the conclusion lines: answer the question the hook opened, without listing what the video covered and without telling the viewer to keep learning.
 List every externally verifiable factual claim in claims. Use only exact URLs from Research sources; use an empty sourceUrls array when the supplied sources do not support a claim.`;
   }
 
@@ -173,7 +174,7 @@ List every externally verifiable factual claim in claims. Use only exact URLs fr
           sections,
           totalDuration: this.calculateSectionsDuration(sections)
         },
-        conclusion: await this.generateConclusion(strategy),
+        conclusion: await this.generateConclusion(strategy, parsed.conclusion),
         callToAction: this.normalizeAICTA(parsed.cta, strategy),
         duration: this.estimateDuration({ sections }),
         tone: template.tone,
@@ -714,19 +715,31 @@ List every externally verifiable factual claim in claims. Use only exact URLs fr
     };
   }
 
-  async generateConclusion(strategy) {
+  /**
+   * The closing used to be the same six lines on every video — "We covered the
+   * key points: the fundamentals and why they matter, practical steps to get
+   * started..." and then "is a journey, not a destination. Keep learning and
+   * improving!" It never came from the model, even when everything before it
+   * did, so a video about a fifteenth-century chronicle ended by listing
+   * practical steps it had never given, read aloud in the narration.
+   *
+   * The model now writes the closing lines. The template, used only when no
+   * provider is configured, says one sentence and claims nothing it did not do.
+   * recap and finalThought keep their names and types: TTS assembly, scene
+   * splitting and the formatted script all read them.
+   */
+  async generateConclusion(strategy, closing = null) {
+    const lines = Array.isArray(closing)
+      ? closing.map(line => String(line || '').trim()).filter(Boolean)
+      : (typeof closing === 'string' && closing.trim() ? [closing.trim()] : []);
+
     return {
       type: 'conclusion',
-      title: 'Wrapping Up',
-      recap: [
-        `So that's everything you need to know about ${strategy.topic}.`,
-        'We covered the key points:',
-        '- The fundamentals and why they matter',
-        '- Practical steps to get started',
-        '- Real-world applications and examples',
-        '- Tips for long-term success'
-      ],
-      finalThought: `Remember, ${strategy.topic} is a journey, not a destination. Keep learning and improving!`,
+      title: 'Conclusion',
+      recap: [],
+      finalThought: lines.length
+        ? lines.join(' ')
+        : `That is where the record leaves ${strategy.topic}.`,
       duration: '30 seconds'
     };
   }

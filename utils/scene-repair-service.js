@@ -57,7 +57,13 @@ function scriptScenes(script = {}) {
     });
   }
   if (script.callToAction) {
-    const scriptText = Object.values(script.callToAction).filter(value => typeof value === 'string').join(' ');
+    // Only the spoken slots. The object also carries a type tag and a duration
+    // label, and joining every string value put "call_to_action" and "15
+    // seconds" into the captions and into any re-recorded scene narration.
+    const scriptText = ['subscribe', 'like', 'comment', 'nextVideo']
+      .map(key => script.callToAction[key])
+      .filter(value => typeof value === 'string' && value.trim())
+      .join(' ');
     if (scriptText) scenes.push({
       label: 'Call to action', scriptText,
       prompt: `${scriptText}. Clean closing visual with open composition, no captions or on-screen text.`

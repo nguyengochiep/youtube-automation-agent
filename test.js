@@ -50,6 +50,7 @@ class SystemTest {
       { name: 'Opening And CTA Carry No Invented Credentials', test: () => this.testOpeningAndCTACarryNoInventedCredentials() },
       { name: 'Script Pacing Is Not Anchored Flat', test: () => this.testScriptPacingIsNotAnchoredFlat() },
       { name: 'Ken Burns Moves Stills Without Breaking Concat', test: () => this.testKenBurnsMovesStillsWithoutBreakingConcat() },
+      { name: 'Closing Narration Carries No Template Or Labels', test: () => this.testClosingNarrationCarriesNoTemplateOrLabels() },
       { name: 'Publishing Safety', test: () => this.testPublishingSafety() },
       { name: 'Multi-Provider Credential Validation', test: () => this.testCredentialValidation() },
       { name: 'AI Text Service Token Compatibility', test: () => this.testAITextServiceTokenParams() },
@@ -2297,6 +2298,91 @@ class SystemTest {
     }
 
     this.logger.info('Narration loudness normalisation test completed successfully');
+  }
+
+
+  async testClosingNarrationCarriesNoTemplateOrLabels() {
+    const { ScriptWriterAgent } = require('./agents/script-writer-agent');
+    const { ProductionManagementAgent } = require('./agents/production-management-agent');
+    const { scriptScenes } = require('./utils/scene-repair-service');
+    const writer = new ScriptWriterAgent(this.db, {});
+    writer.logger.info = () => {};
+    writer.logger.warn = () => {};
+
+    // Every video used to close on the same six lines, spoken aloud, whether or
+    // not the rest of the script had been written by a model.
+    const TEMPLATE = [
+      'we covered the key points', 'fundamentals and why they matter',
+      'practical steps to get started', 'real-world applications',
+      'tips for long-term success', 'journey, not a destination', 'keep learning and improving'
+    ];
+    const strategy = { topic: 'The lake and the sword', contentType: 'Story' };
+    const assertClean = (label, text) => {
+      const lower = String(text).toLowerCase();
+      for (const phrase of TEMPLATE) {
+        if (lower.includes(phrase)) throw new Error(`${label} still says "${phrase}"`);
+      }
+    };
+
+    const fallback = await writer.generateConclusion(strategy);
+    if (!Array.isArray(fallback.recap) || typeof fallback.finalThought !== 'string') {
+      throw new Error('conclusion.recap must stay an array and finalThought a string; three callers read them');
+    }
+    assertClean('The template conclusion', [...fallback.recap, fallback.finalThought].join(' '));
+
+    const written = await writer.generateConclusion(strategy, [
+      'So the sword was never given back.',
+      'It fell, and the king drained the lake looking for it.'
+    ]);
+    if (!written.finalThought.includes('never given back') || !written.finalThought.includes('drained the lake')) {
+      throw new Error('The model-written closing was discarded in favour of the template');
+    }
+    if (!/"conclusion"/.test(writer.buildScriptPrompt(strategy, { tone: 'narrative', pacing: 'measured' }))) {
+      throw new Error('The script contract no longer asks the model for the closing lines');
+    }
+
+    const script = {
+      title: 'T',
+      hook: { text: 'Hook line.' },
+      introduction: { greeting: '', topicIntro: 'Opening line.', valueProposition: '', credibility: '' },
+      mainContent: {
+        sections: [
+          { title: 'Tang thương ngẫu lục (1806)', content: ['The sword fell into the water.'], duration: 45 },
+          { title: 'Lam Sơn thực lục', content: ['No lake appears.'], duration: 30 }
+        ]
+      },
+      conclusion: written,
+      callToAction: {
+        type: 'call_to_action', subscribe: 'Subscribe for the next one.', like: '',
+        comment: 'Correct me below.', nextVideo: '', duration: '15 seconds'
+      }
+    };
+
+    // The narration is one reading of this text, sliced between scenes after.
+    const tts = ProductionManagementAgent.prototype.formatScriptForTTS.call({}, script);
+    if (/Section \d+:/.test(tts)) throw new Error('The narration still reads section titles aloud as "Section N:"');
+    if (tts.includes('Tang thương ngẫu lục (1806)')) throw new Error('A section title was read into the narration');
+    if (!tts.includes('The sword fell into the water.')) throw new Error('Section prose went missing from the narration');
+    if (!tts.includes('drained the lake')) throw new Error('The closing lines went missing from the narration');
+    assertClean('The narration', tts);
+
+    // Captions and any re-recorded scene narration come from the scene text.
+    const scenes = scriptScenes(script);
+    const cta = scenes.find(scene => scene.label === 'Call to action');
+    if (!cta) throw new Error('The call to action scene disappeared');
+    if (/call_to_action|15 seconds/.test(cta.scriptText)) {
+      throw new Error(`The call to action scene carries its type tag or duration label: "${cta.scriptText}"`);
+    }
+    if (!cta.scriptText.includes('Subscribe for the next one.') || !cta.scriptText.includes('Correct me below.')) {
+      throw new Error('The spoken call to action lines went missing from the scene');
+    }
+    const closing = scenes.find(scene => scene.label === 'Conclusion');
+    if (!closing || !closing.scriptText.includes('drained the lake')) {
+      throw new Error('The closing scene lost its text');
+    }
+    assertClean('The closing scene', closing.scriptText);
+
+    this.logger.info('Closing narration test completed successfully');
   }
 
 

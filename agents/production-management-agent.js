@@ -172,8 +172,11 @@ class ProductionManagementAgent {
     
     // Add main content
     if (script.mainContent && script.mainContent.sections) {
-      script.mainContent.sections.forEach((section, index) => {
-        ttsText += `Section ${index + 1}: ${section.title}\n`;
+      // Sections go into the recording as prose only. Reading each title aloud
+      // as "Section 3: ..." turned the narration into a spoken table of
+      // contents, and put words into the audio that no scene's text accounts
+      // for, which skews where the recording is sliced between scenes.
+      script.mainContent.sections.forEach((section) => {
         
         if (Array.isArray(section.content)) {
           section.content.forEach(line => {

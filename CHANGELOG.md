@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Stopped every script closing on the same template lines, read aloud in the narration ("practical steps to get started", "keep learning and improving"): the model now writes the closing through a new optional `conclusion` field, and the provider-less template says one sentence instead of listing points it never made
+- Stopped reading each section title into the narration as "Section N: ...", which turned the recording into a spoken table of contents and put words into the audio that no scene's text accounted for
+- Kept the call-to-action scene text to its spoken lines, so captions and re-recorded scene narration no longer carry its `call_to_action` type tag and `15 seconds` duration label
 - Added a slow Ken Burns push to every still in the rendered timeline, alternating direction scene to scene, so a stills-only video no longer holds a frozen frame for the length of a scene; provider video clips and scenes too short to travel through are left alone
 - Computed the move on a 4x intermediate after measuring the frame-to-frame spread fall from 92% of the mean at 1x to 44% at 2x and 18% at 4x, for 18% more render time
 - Added `KEN_BURNS`, `KEN_BURNS_ZOOM` and `KEN_BURNS_SUPERSAMPLE`, with out-of-range zooms falling back to the default rather than rendering an implausible push
