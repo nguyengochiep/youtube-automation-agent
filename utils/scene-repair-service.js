@@ -9,6 +9,12 @@ const { ProvenanceService } = require('./provenance-service');
 // normalised again for YouTube when the audio is muxed onto the picture.
 const SCENE_TARGET_LUFS = -16;
 
+// A re-recorded take is rarely the same length as the one it replaces, and the
+// rebuild trims every take to its scene's duration. Without re-timing, a longer
+// take loses its last words — the first scene repaired on video two came back
+// 2.2 seconds longer than its slot. This is the breath left after the last word.
+const NARRATION_TAIL_SECONDS = 0.6;
+
 const VIDEO_EXTENSIONS = new Set(['.mp4']);
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 
@@ -155,6 +161,14 @@ class SceneRepairService {
 
   // Returns the playable length of a media file in seconds, or null when it
   // cannot be read — callers treat that as "leave the estimate alone".
+  // Time a scene to the take that now exists. Falls back to the scene's current
+  // duration when the file cannot be measured, so a provider that returns
+  // something FFmpeg cannot read never shortens a scene to nothing.
+  async narrationDuration(audioPath, fallback) {
+    const spoken = await this.probeDurationSeconds(audioPath);
+    return spoken ? Math.max(2, Number((spoken + NARRATION_TAIL_SECONDS).toFixed(2))) : fallback;
+  }
+
   async probeDurationSeconds(file) {
     if (!file) return null;
     try {
@@ -335,6 +349,7 @@ class SceneRepairService {
       };
       const next = await this.db.updateProductionScene(productionId, sceneId, {
         audioPath: generatedPath,
+        duration: await this.narrationDuration(generatedPath, scene.duration),
         narrationStatus: 'current',
         narrationProvider: evidence.provider || 'configured-tts',
         narrationModel: evidence.model || null,
@@ -493,6 +508,7 @@ class SceneRepairService {
         }
         const evidence = this.videoGenerator.lastNarrationResult || {};
         narration = {
+          duration: await this.narrationDuration(generatedPath, scene.duration),
           audioPath: generatedPath, narrationStatus: 'current',
           narrationProvider: evidence.provider || 'configured-tts', narrationModel: evidence.model || null,
           narrationTaskId: evidence.externalTaskId || null, narrationError: null,

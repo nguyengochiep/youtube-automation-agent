@@ -52,6 +52,7 @@ class SystemTest {
       { name: 'Ken Burns Moves Stills Without Breaking Concat', test: () => this.testKenBurnsMovesStillsWithoutBreakingConcat() },
       { name: 'Closing Narration Carries No Template Or Labels', test: () => this.testClosingNarrationCarriesNoTemplateOrLabels() },
       { name: 'Script Prompt Forbids Unsupported Absence Claims', test: () => this.testScriptPromptForbidsUnsupportedAbsenceClaims() },
+      { name: 'Re-recorded Narration Re-times Its Scene', test: () => this.testReRecordedNarrationRetimesItsScene() },
       { name: 'Publishing Safety', test: () => this.testPublishingSafety() },
       { name: 'Multi-Provider Credential Validation', test: () => this.testCredentialValidation() },
       { name: 'AI Text Service Token Compatibility', test: () => this.testAITextServiceTokenParams() },
@@ -2299,6 +2300,77 @@ class SystemTest {
     }
 
     this.logger.info('Narration loudness normalisation test completed successfully');
+  }
+
+
+  async testReRecordedNarrationRetimesItsScene() {
+    const fs = require('fs').promises;
+    const os = require('os');
+    const { SceneRepairService } = require('./utils/scene-repair-service');
+    const { runFFmpeg, checkFFmpeg } = require('./utils/ffmpeg');
+    if (typeof checkFFmpeg === 'function' && !(await checkFFmpeg())) {
+      this.logger.info('Skipping narration re-timing: FFmpeg is unavailable');
+      return;
+    }
+
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'yaa-retime-'));
+    const db = new Database();
+    db.dbPath = path.join(directory, 'retime.db');
+    await db.initialize();
+    try {
+      const productionId = 'prod-narration-retime';
+      const visualPath = path.join(directory, 'scene.png');
+      await fs.writeFile(visualPath, Buffer.from('visual'));
+      const production = {
+        id: productionId, status: 'ready',
+        strategy: { topic: 'Re-timing' },
+        script: { title: 'Re-timing', fullScript: 'A script long enough to satisfy the persistence rules for a production.'.repeat(4) },
+        seo: { title: 'Re-timing', description: 'Checks that a re-recorded take sets its scene length.', tags: ['a', 'b', 'c'] },
+        assets: { audio: { path: null, status: 'partial' }, finalVideo: { path: null, simulated: true }, thumbnail: { path: visualPath } },
+        timeline: {}, priority: 50, scheduledPublishTime: new Date(Date.now() + 86400000).toISOString()
+      };
+      await db.saveProductionData(production);
+      await db.saveProductionSnapshot(production);
+      await db.replaceProductionScenes(productionId, [{
+        id: 'scene-retime-1', label: 'Slot', scriptText: 'A take that runs longer than its slot.',
+        prompt: 'Visual', duration: 3, assetType: 'image', assetOrigin: 'generated', assetPath: visualPath,
+        status: 'ready', narrationStatus: 'stale', rightsConfirmed: true
+      }]);
+
+      // A real five-second take in a three-second slot: the shape of the
+      // repair on video two, where the new take ran 2.2 seconds long.
+      let writeRealAudio = true;
+      const generator = {
+        lastNarrationResult: null,
+        async generateTTSAudio(_text, outputPath) {
+          if (writeRealAudio) {
+            await runFFmpeg(['-y', '-f', 'lavfi', '-i', 'sine=frequency=220:duration=5', '-q:a', '9', outputPath]);
+          } else {
+            await fs.writeFile(outputPath, Buffer.from('not audio a probe can read'));
+          }
+          this.lastNarrationResult = { status: 'ready', provider: 'stub', model: null, generatedAt: new Date().toISOString(), cost: {} };
+          return outputPath;
+        },
+        isUsableAudioFile: async filePath => Boolean(filePath && await fs.stat(filePath).then(stat => stat.size > 0).catch(() => false))
+      };
+      const service = new SceneRepairService(db, generator, { dataRoot: directory, logger: this.logger });
+
+      const retimed = await service.regenerateNarration(productionId, 'scene-retime-1', { confirmCost: true });
+      if (Math.abs(Number(retimed.duration) - 5.6) > 0.25) {
+        throw new Error(`A 5-second take left its scene at ${retimed.duration}s; the rebuild would cut the last words`);
+      }
+
+      // A take FFmpeg cannot measure must not shorten or zero the scene.
+      writeRealAudio = false;
+      const kept = await service.regenerateNarration(productionId, 'scene-retime-1', { confirmCost: true });
+      if (Number(kept.duration) !== Number(retimed.duration)) {
+        throw new Error(`An unmeasurable take changed the scene from ${retimed.duration}s to ${kept.duration}s`);
+      }
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true }).catch(() => {});
+    }
+
+    this.logger.info('Narration re-timing test completed successfully');
   }
 
 

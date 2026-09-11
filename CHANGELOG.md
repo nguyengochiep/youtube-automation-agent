@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Re-timed a scene to its re-recorded narration: regenerating one scene's narration left the scene at its old duration, and the rebuild trims every take to that duration, so a longer take lost its last words — the first repair on video two came back 2.2 seconds longer than its slot
 - Told the script model that saying a source does not mention something is itself a factual claim, allowed only when the channel constraints state it: two runs of the same video announced that Tang thương ngẫu lục "does not mention a turtle" when the text has one surfacing, taking the sword, and diving
 - Stopped every script closing on the same template lines, read aloud in the narration ("practical steps to get started", "keep learning and improving"): the model now writes the closing through a new optional `conclusion` field, and the provider-less template says one sentence instead of listing points it never made
 - Stopped reading each section title into the narration as "Section N: ...", which turned the recording into a spoken table of contents and put words into the audio that no scene's text accounted for
