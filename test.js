@@ -52,6 +52,7 @@ class SystemTest {
       { name: 'Ken Burns Moves Stills Without Breaking Concat', test: () => this.testKenBurnsMovesStillsWithoutBreakingConcat() },
       { name: 'Closing Narration Carries No Template Or Labels', test: () => this.testClosingNarrationCarriesNoTemplateOrLabels() },
       { name: 'Script Prompt Forbids Unsupported Absence Claims', test: () => this.testScriptPromptForbidsUnsupportedAbsenceClaims() },
+      { name: 'Script Length Budget Sizes The Request', test: () => this.testScriptLengthBudgetSizesTheRequest() },
       { name: 'Re-recorded Narration Re-times Its Scene', test: () => this.testReRecordedNarrationRetimesItsScene() },
       { name: 'Publishing Safety', test: () => this.testPublishingSafety() },
       { name: 'Multi-Provider Credential Validation', test: () => this.testCredentialValidation() },
@@ -2300,6 +2301,56 @@ class SystemTest {
     }
 
     this.logger.info('Narration loudness normalisation test completed successfully');
+  }
+
+
+  async testScriptLengthBudgetSizesTheRequest() {
+    const { ScriptWriterAgent } = require('./agents/script-writer-agent');
+    const agent = new ScriptWriterAgent(this.db, {});
+    agent.logger.info = () => {};
+    agent.logger.warn = () => {};
+
+    // Video two asked for "8-12 minutes" and came back at three and a half: the
+    // model was never given a word count, and a hard-coded 1800-token ceiling
+    // could not hold one once the JSON and the claims list were paid for.
+    const medium = { requestedLength: '8-12 minutes' };
+    if (agent.targetSpokenWords(medium) !== 1300) {
+      throw new Error(`8-12 minutes should budget 1300 spoken words, got ${agent.targetSpokenWords(medium)}`);
+    }
+    if (agent.targetSpokenWords({ requestedLength: '2-4 minutes' }) !== 350) {
+      throw new Error('A short video no longer gets a short budget');
+    }
+    for (const length of ['2-4 minutes', '8-12 minutes', '15-20 minutes']) {
+      const count = agent.targetSectionCount({ requestedLength: length });
+      if (count < 3 || count > 8) throw new Error(`${length} asked for ${count} sections; normalisation keeps three to eight`);
+    }
+    if (agent.scriptMaxTokens(medium) < agent.targetSpokenWords(medium) * 1.4) {
+      throw new Error('The token ceiling cannot hold the word budget it was sized for');
+    }
+    const prompt = agent.buildScriptPrompt({ topic: 'T', contentType: 'Story', ...medium }, { tone: 'narrative', pacing: 'measured' });
+    if (!prompt.includes('about 1300 spoken words') || !prompt.includes('do not pad it')) {
+      throw new Error('The prompt no longer states the word budget or the no-padding rule');
+    }
+
+    // The regression itself: the ceiling actually sent to the provider.
+    let sent = null;
+    agent.aiTextService = {
+      isAvailable: () => true,
+      providerName: 'stub',
+      async generateText(_prompt, options) {
+        sent = options;
+        return JSON.stringify({
+          title: 'T', hook: 'H', sections: [{ title: 'S', content: ['a'], duration: 45 }], cta: 'c', claims: []
+        });
+      }
+    };
+    const long = { topic: 'T', contentType: 'Story', requestedLength: '15-20 minutes', researchSources: [] };
+    await agent.generateScriptWithAI(long, { tone: 'narrative', pacing: 'measured' });
+    if (!sent || sent.maxTokens !== agent.scriptMaxTokens(long) || sent.maxTokens <= 1800) {
+      throw new Error(`The provider was sent maxTokens ${sent && sent.maxTokens}; expected ${agent.scriptMaxTokens(long)}`);
+    }
+
+    this.logger.info('Script length budget test completed successfully');
   }
 
 

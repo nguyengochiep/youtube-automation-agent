@@ -1,6 +1,10 @@
 const { Logger } = require('../utils/logger');
 const { AITextService } = require('../utils/ai-text-service');
 
+// Measured narration pace, used to turn "8-12 minutes" into a word budget the
+// model can actually aim at.
+const NARRATION_WORDS_PER_MINUTE = 165;
+
 class ScriptWriterAgent {
   constructor(db, credentials) {
     this.db = db;
@@ -107,6 +111,30 @@ class ScriptWriterAgent {
    * that number, and the first published video came back as six identical
    * sixty-second blocks with three bullets each.
    */
+  /**
+   * The prompt asked for "8-12 minutes" and video two came back at three and a
+   * half. The model was never told how many words that is, and 1800 output
+   * tokens could not hold it anyway once the JSON and the claims list were paid
+   * for. The lower bound of the requested range becomes a word budget — the
+   * lower bound, because every extra word is one more claim to verify — and
+   * the token ceiling is sized to fit it.
+   */
+  targetSpokenWords(strategy = {}) {
+    const text = String(strategy.requestedLength || process.env.DEFAULT_VIDEO_LENGTH || '8-12 minutes');
+    const minutes = Number((text.match(/\d+(?:\.\d+)?/) || [])[0]) || 8;
+    return Math.max(200, Math.round((minutes * NARRATION_WORDS_PER_MINUTE) / 50) * 50);
+  }
+
+  targetSectionCount(strategy = {}) {
+    // normalizeAISections keeps at most eight.
+    return Math.min(8, Math.max(3, Math.round(this.targetSpokenWords(strategy) / 180)));
+  }
+
+  scriptMaxTokens(strategy = {}) {
+    // Roughly 1.4 tokens a word, plus the JSON scaffolding and the claims list.
+    return Math.max(1800, Math.ceil(this.targetSpokenWords(strategy) * 1.6) + 800);
+  }
+
   buildScriptPrompt(strategy, template) {
     return `You are writing a YouTube script plan.
 Return only valid JSON with this exact shape:
@@ -129,7 +157,7 @@ Topic: ${strategy.topic}
 Style/content type: ${strategy.contentType}
 Angle: ${strategy.angle}
 Target audience: ${strategy.targetAudience}
-Desired length: ${strategy.requestedLength || process.env.DEFAULT_VIDEO_LENGTH || '8-12 minutes'}
+Desired length: ${strategy.requestedLength || process.env.DEFAULT_VIDEO_LENGTH || '8-12 minutes'} — about ${this.targetSpokenWords(strategy)} spoken words across the hook, opening, sections and conclusion, in ${this.targetSectionCount(strategy)} sections. Fill that length with material the sources support; do not pad it
 Tone: ${template.tone}
 Pacing: ${template.pacing}
 Brand voice: ${strategy.brandVoice || 'clear, credible, and engaging'}
@@ -155,7 +183,7 @@ List every externally verifiable factual claim in claims. Use only exact URLs fr
 
     try {
       const response = await this.aiTextService.generateText(prompt, {
-        maxTokens: 1800,
+        maxTokens: this.scriptMaxTokens(strategy),
         temperature: 0.7
       });
       const parsed = this.parseAIJsonResponse(response);
