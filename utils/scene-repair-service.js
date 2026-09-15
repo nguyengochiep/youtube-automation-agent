@@ -201,6 +201,16 @@ class SceneRepairService {
     const directory = path.join(this.dataRoot, 'audio', 'scenes', production.id);
     await fs.mkdir(directory, { recursive: true });
 
+    // Record each scene from its own text when the generator can. Slicing the
+    // one long recording at word-count boundaries never lands on the pause
+    // between scenes: on video three every sliced take ran at exactly 2.87 words
+    // a second, and four of them opened with the previous scene's last words.
+    // The pauses are no help either — one recording had no gap longer than
+    // 1.2 s at all — so the cut cannot be snapped to silence instead.
+    if (typeof this.videoGenerator?.generateTTSAudio === 'function') {
+      return this.recordSceneNarration(production, scenes, directory);
+    }
+
     // Scene durations arrive as a word-count estimate, but the narration is one
     // recording that gets sliced at those boundaries. When the estimate runs
     // long the last slices start past the end of the audio and come back empty,
@@ -241,6 +251,38 @@ class SceneRepairService {
         scene.narrationError = `Narration segment could not be prepared: ${error.message}`;
       }
       start += Number(scene.duration);
+    }
+    return scenes;
+  }
+
+  // A scene whose take fails is left failed rather than filled from the long
+  // recording: a sliced take is exactly the defect this replaces, and a failed
+  // scene blocks the rebuild until its narration is regenerated.
+  async recordSceneNarration(production, scenes, directory) {
+    const audio = production.assets?.audio || {};
+    for (const scene of scenes) {
+      const output = path.join(directory, `${String(scene.position).padStart(3, '0')}_r1.mp3`);
+      try {
+        const generatedPath = await this.videoGenerator.generateTTSAudio(scene.scriptText, output);
+        const evidence = this.videoGenerator.lastNarrationResult || {};
+        if (!await this.videoGenerator.isUsableAudioFile(generatedPath)) {
+          throw new Error('the TTS provider returned no usable audio');
+        }
+        scene.audioPath = generatedPath;
+        scene.duration = await this.narrationDuration(generatedPath, scene.duration);
+        scene.narrationStatus = 'current';
+        scene.narrationProvider = evidence.provider || audio.provider || null;
+        scene.narrationModel = evidence.model || audio.model || null;
+        scene.narrationTaskId = evidence.externalTaskId || null;
+        scene.narrationError = null;
+        scene.narrationGeneratedAt = evidence.generatedAt || new Date().toISOString();
+        scene.narrationCost = evidence.cost || {};
+      } catch (error) {
+        this.logger.warn(`Could not record narration for scene ${scene.position + 1}: ${error.message}`);
+        scene.audioPath = null;
+        scene.narrationStatus = 'failed';
+        scene.narrationError = `Scene narration could not be recorded (${error.message}). Regenerate this scene's narration before rebuilding or approving.`;
+      }
     }
     return scenes;
   }

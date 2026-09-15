@@ -46,6 +46,7 @@ class SystemTest {
       { name: 'Timeline Renders Mixed Image Sizes', test: () => this.testTimelineRendersMixedImageSizes() },
       { name: 'Narration Loudness Normalisation', test: () => this.testNarrationLoudnessNormalisation() },
       { name: 'Scene Timing And Levelling', test: () => this.testSceneTimingAndLevellingFromNarration() },
+      { name: 'Scene Narration Is Recorded Per Scene', test: () => this.testSceneNarrationIsRecordedPerScene() },
       { name: 'Description Chapters Follow Scene Timings', test: () => this.testDescriptionChaptersFollowSceneTimings() },
       { name: 'Opening And CTA Carry No Invented Credentials', test: () => this.testOpeningAndCTACarryNoInventedCredentials() },
       { name: 'Script Pacing Is Not Anchored Flat', test: () => this.testScriptPacingIsNotAnchoredFlat() },
@@ -3028,6 +3029,82 @@ class SystemTest {
     }
 
     this.logger.info('Scene timing and levelling test completed successfully');
+  }
+
+  async testSceneNarrationIsRecordedPerScene() {
+    const fsp = require('fs').promises;
+    const os = require('os');
+    const pathMod = require('path');
+    const { SceneRepairService } = require('./utils/scene-repair-service');
+    const { runFFmpeg, checkFFmpeg } = require('./utils/ffmpeg');
+
+    if (typeof checkFFmpeg === 'function' && !(await checkFFmpeg())) {
+      this.logger.info('Skipping per-scene narration test: FFmpeg is unavailable');
+      return;
+    }
+
+    // Slicing one long recording at word-count boundaries put the tail of each
+    // scene into the next: four scenes of video three opened with the words of
+    // the scene before. Every scene has to be recorded from its own text.
+    const dir = await fsp.mkdtemp(pathMod.join(os.tmpdir(), 'scene-narration-'));
+    try {
+      const fullRecording = pathMod.join(dir, 'narration.wav');
+      await runFFmpeg(['-y', '-f', 'lavfi', '-i', 'sine=frequency=220:duration=20', fullRecording]);
+
+      const recorded = [];
+      const generator = {
+        lastNarrationResult: null,
+        async generateTTSAudio(text, outputPath) {
+          recorded.push(text);
+          if (text.includes('quota')) throw new Error('provider quota exhausted');
+          // One second of audio per word, so each take's length is known.
+          const seconds = text.trim().split(/\s+/).length;
+          await runFFmpeg(['-y', '-f', 'lavfi', '-i', `sine=frequency=330:duration=${seconds}`, '-c:a', 'libmp3lame', outputPath]);
+          this.lastNarrationResult = { provider: 'test-tts', model: 'test-voice', generatedAt: new Date().toISOString(), cost: { billed: false } };
+          return outputPath;
+        },
+        async isUsableAudioFile(file) {
+          try { return (await fsp.stat(file)).size > 0; } catch (_error) { return false; }
+        }
+      };
+      const service = new SceneRepairService({}, generator, { logger: { info: () => {}, warn: () => {} }, dataRoot: dir });
+
+      // Estimates deliberately far from what each text takes to say.
+      const scenes = [
+        { position: 0, duration: 12, scriptText: 'one two three' },
+        { position: 1, duration: 3, scriptText: 'four five six seven eight' },
+        { position: 2, duration: 5, scriptText: 'this take hits a quota' }
+      ];
+      await service.initializeAudioSegments(
+        { id: 'prod_per_scene_test', assets: { audio: { path: fullRecording, provider: 'test-tts' } } },
+        scenes
+      );
+
+      if (JSON.stringify(recorded) !== JSON.stringify(scenes.map(scene => scene.scriptText))) {
+        throw new Error(`Scenes were not each recorded from their own text; recorded ${JSON.stringify(recorded)}`);
+      }
+      const expected = [3.6, 5.6];
+      for (const [index, seconds] of expected.entries()) {
+        const scene = scenes[index];
+        if (scene.narrationStatus !== 'current' || !scene.audioPath || scene.audioPath === fullRecording) {
+          throw new Error(`Scene ${index + 1} does not carry its own current take`);
+        }
+        if (Math.abs(Number(scene.duration) - seconds) > 0.25) {
+          throw new Error(`Scene ${index + 1} lasts ${scene.duration}s, not its ${seconds - 0.6}s take plus the tail`);
+        }
+        if (scene.narrationProvider !== 'test-tts') {
+          throw new Error(`Scene ${index + 1} lost the provider evidence of its take`);
+        }
+      }
+      const failed = scenes[2];
+      if (failed.narrationStatus !== 'failed' || failed.audioPath || !/Regenerate/.test(failed.narrationError || '')) {
+        throw new Error('A scene whose take failed was filled in instead of being left failed for the operator');
+      }
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+
+    this.logger.info('Per-scene narration test completed successfully');
   }
 
 
