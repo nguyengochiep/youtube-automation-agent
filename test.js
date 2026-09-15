@@ -54,6 +54,7 @@ class SystemTest {
       { name: 'Script Prompt Forbids Unsupported Absence Claims', test: () => this.testScriptPromptForbidsUnsupportedAbsenceClaims() },
       { name: 'Script Length Budget Sizes The Request', test: () => this.testScriptLengthBudgetSizesTheRequest() },
       { name: 'Re-recorded Narration Re-times Its Scene', test: () => this.testReRecordedNarrationRetimesItsScene() },
+      { name: 'Upload Description Keeps Line Breaks', test: () => this.testUploadDescriptionKeepsLineBreaks() },
       { name: 'Publishing Safety', test: () => this.testPublishingSafety() },
       { name: 'Multi-Provider Credential Validation', test: () => this.testCredentialValidation() },
       { name: 'AI Text Service Token Compatibility', test: () => this.testAITextServiceTokenParams() },
@@ -1043,6 +1044,30 @@ class SystemTest {
       await fs.rm(directory, { recursive: true, force: true });
     }
     this.logger.info('Production readiness gate test completed successfully');
+  }
+
+  async testUploadDescriptionKeepsLineBreaks() {
+    // Video two went up with every line feed stripped: the paragraphs ran
+    // together and YouTube showed no chapters, because a chapter is only read
+    // when its timestamp starts a line.
+    const description = 'Lead line.\r\n\r\nChapters\r\n0:00 Introduction\n0:30 The texts\tin order';
+    const { valid, value } = validateYouTubeMetadata({
+      title: 'Line\nbreaks\r\ncollapse in titles',
+      description,
+      tags: ['history', 'vietnam', 'myth'],
+      metadata: { category: 27, language: 'en' }
+    });
+    if (!valid) throw new Error('A multi-line description was rejected');
+    if (value.description !== 'Lead line.\n\nChapters\n0:00 Introduction\n0:30 The texts in order') {
+      throw new Error(`Upload description lost its line structure: ${JSON.stringify(value.description)}`);
+    }
+    if (!/(^|\n)0:00 /.test(value.description) || !/\n0:30 /.test(value.description)) {
+      throw new Error('Chapter timestamps no longer start their own lines, so YouTube will not show chapters');
+    }
+    if (value.title !== 'Line breaks collapse in titles') {
+      throw new Error('A title kept line breaks; titles must stay on one line');
+    }
+    this.logger.info('Upload description line break test completed successfully');
   }
 
   async testVideoProviderLayer() {

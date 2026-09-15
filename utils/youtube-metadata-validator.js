@@ -13,6 +13,18 @@ function cleanText(value) {
   return removeControlCharacters(value, ' ').replace(/\s+/g, ' ').trim();
 }
 
+// Descriptions are multi-line: YouTube only recognises chapters when each
+// timestamp starts its own line. Stripping every control character took the
+// line feeds with them, and video two went up as one run-on paragraph with no
+// chapters. Keep line feeds, fold CRLF to LF, drop the rest.
+function cleanDescription(value) {
+  const normalised = String(value ?? '').replace(/\r\n?/g, '\n').replace(/\t/g, ' ');
+  return Array.from(normalised).filter(character => {
+    const code = character.charCodeAt(0);
+    return code === 10 || (code > 31 && code !== 127);
+  }).join('');
+}
+
 function normalizeTags(input) {
   const values = Array.isArray(input) ? input : String(input || '').split(',');
   const unique = [];
@@ -37,7 +49,7 @@ function normalizeYouTubeMetadata(metadata = {}) {
   const snippet = metadata.snippet || metadata.seo || metadata;
   return {
     title: cleanText(snippet.title).slice(0, MAX_TITLE_LENGTH),
-    description: removeControlCharacters(snippet.description).slice(0, MAX_DESCRIPTION_LENGTH).trim(),
+    description: cleanDescription(snippet.description).slice(0, MAX_DESCRIPTION_LENGTH).trim(),
     tags: normalizeTags(snippet.tags),
     categoryId: String(snippet.categoryId ?? snippet.metadata?.category ?? '22').trim(),
     defaultLanguage: String(snippet.defaultLanguage ?? snippet.metadata?.language ?? 'en').trim(),
